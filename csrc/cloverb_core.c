@@ -418,3 +418,94 @@ int cb_legal_after(const uint16_t *mv, int nply, uint16_t *out) {
     for (int i = 0; i < n; i++) out[i] = pack(lm[i]);
     return n;
 }
+
+// ----------------------------------------------------------------------------------- engine side
+static int board_from_fen(Board *B, const char *fen) {
+    memset(B, 0, sizeof(*B));
+    B->ep = -1; B->ksq[0] = B->ksq[1] = -1; B->fullmove = 1;
+    int r = 7, f = 0;
+    const char *p = fen;
+    for (; *p && *p != ' '; p++) {
+        char ch = *p;
+        if (ch == '/') { r--; f = 0; continue; }
+        if (ch >= '1' && ch <= '8') { f += ch - '0'; continue; }
+        int c = (ch >= 'a' && ch <= 'z'), t;
+        switch (c ? ch - 32 : ch) {
+            case 'P': t = PAWN; break; case 'N': t = KNIGHT; break; case 'B': t = BISHOP; break;
+            case 'R': t = ROOK; break; case 'Q': t = QUEEN; break; case 'K': t = KING; break; default: return 0;
+        }
+        if (r < 0 || f > 7) return 0;
+        B->sq[r * 8 + f] = MK(c, t);
+        if (t == KING) B->ksq[c] = r * 8 + f;
+        f++;
+    }
+    if (B->ksq[0] < 0 || B->ksq[1] < 0) return 0;
+    while (*p == ' ') p++;
+    B->stm = (*p == 'b');
+    while (*p && *p != ' ') p++;
+    while (*p == ' ') p++;
+    for (; *p && *p != ' '; p++) {
+        if (*p == 'K') B->castle |= 1; else if (*p == 'Q') B->castle |= 2;
+        else if (*p == 'k') B->castle |= 4; else if (*p == 'q') B->castle |= 8;
+    }
+    while (*p == ' ') p++;
+    if (*p >= 'a' && *p <= 'h' && p[1] >= '1' && p[1] <= '8') B->ep = (p[1] - '1') * 8 + (p[0] - 'a');
+    while (*p && *p != ' ') p++;
+    while (*p == ' ') p++;
+    if (*p) B->halfmove = (int16_t)atoi(p);
+    while (*p && *p != ' ') p++;
+    while (*p == ' ') p++;
+    if (*p) B->fullmove = (int16_t)atoi(p);
+    return 1;
+}
+
+// Encode the position after playing `nmoves` packed moves from `fen` (NULL = start position),
+// as one sample of cb_build_batch (history covers only moves after the FEN). Also returns the
+// legal moves packed like the store in `legal_out` (<= 256). Returns the number of legal moves,
+// or -1 for a bad FEN / illegal move.
+int cb_encode_position(const char *fen, const uint16_t *mv, int nmoves, int H, int8_t *board, int16_t *meta,
+                       int8_t *hist, uint8_t *legal, uint16_t *legal_out) {
+    init_tables();
+    Board B;
+    if (fen && fen[0]) { if (!board_from_fen(&B, fen)) return -1; } else board_init(&B);
+    int8_t ptype[1024], pcap[1024];
+    if (nmoves > 1023) return -1;
+    for (int k = 0; k < nmoves; k++) {
+        Move m = unpack(mv[k]);
+        Move lm[256]; int nl = gen_legal(&B, lm), ok = 0;
+        for (int i = 0; i < nl; i++) if (lm[i].from == m.from && lm[i].to == m.to && lm[i].promo == m.promo) ok = 1;
+        if (!ok) return -1;
+        int pc = B.sq[m.from];
+        ptype[k] = TYPE(pc) - 1;
+        pcap[k] = B.sq[m.to] != EMPTY || (TYPE(pc) == PAWN && m.to == B.ep);
+        make_move(&B, m);
+    }
+    int black = B.stm, c = B.stm;
+    for (int s = 0; s < 64; s++) {
+        int p = B.sq[persp(s, black)];
+        board[s] = p == EMPTY ? 0 : (COLOR(p) == c ? TYPE(p) : 6 + TYPE(p));
+    }
+    int ownK = c ? 4 : 1, ownQ = c ? 8 : 2, oppK = c ? 1 : 4, oppQ = c ? 2 : 8;
+    meta[0] = !!(B.castle & ownK); meta[1] = !!(B.castle & ownQ); meta[2] = !!(B.castle & oppK); meta[3] = !!(B.castle & oppQ);
+    meta[4] = B.ep >= 0 ? persp(B.ep, black) : -1;
+    meta[5] = B.halfmove; meta[6] = B.fullmove; meta[7] = attacked(&B, B.ksq[c], c ^ 1);
+    for (int j = 1; j <= H; j++) {
+        int8_t *h = hist + (j - 1) * 4;
+        int k = nmoves - j;
+        if (k < 0) { h[0] = h[1] = h[2] = h[3] = -1; continue; }
+        Move m = unpack(mv[k]);
+        h[0] = persp(m.from, black); h[1] = persp(m.to, black); h[2] = ptype[k]; h[3] = pcap[k];
+    }
+    Move lm[256];
+    int nl = gen_legal(&B, lm);
+    memset(legal, 0, 544);
+    for (int i = 0; i < nl; i++) {
+        int v = vocab_index(lm[i], black);
+        legal[v >> 3] |= (uint8_t)(1 << (v & 7));
+        legal_out[i] = pack(lm[i]);
+    }
+    return nl;
+}
+
+// Vocabulary index (mover perspective) of a packed move for the side to move `black`.
+int cb_vocab_index(uint16_t mv, int black) { return vocab_index(unpack(mv), black); }

@@ -109,6 +109,8 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--elo-alpha", type=float, default=0.3)
     ap.add_argument("--max-hours", type=float, default=1e9)
+    ap.add_argument("--teacher", default=None, help="maia3-5m | maia3-23m | maia3-79m (online distillation)")
+    ap.add_argument("--distill-w", type=float, default=0.5, help="weight of teacher soft-CE vs human-move CE")
     a = ap.parse_args()
 
     torch.set_num_threads(a.threads)
@@ -138,7 +140,12 @@ def main():
     gs = concat_stores(a.stores)
     print(f"train store: {gs.n_games} games, {len(gs.moves)} plies", flush=True)
     sampler = Sampler(gs, SamplerConfig(elo_alpha=a.elo_alpha, seed=a.seed + step))
-    pf = Prefetcher(gs, sampler, a.batch, a.hist, extra=maia_extra if a.arch == "chessformer" else None)
+    need_maia = a.arch == "chessformer" or a.teacher is not None
+    pf = Prefetcher(gs, sampler, a.batch, a.hist, extra=maia_extra if need_maia else None)
+    teacher = None
+    if a.teacher:
+        from .teacher import FastMaia3, teacher_logprobs
+        teacher = torch.compile(FastMaia3(a.teacher)) if a.compile else FastMaia3(a.teacher)
     egs = GameStore.load(a.eval_store)
     eidx = np.load(a.eval_idx)
 
@@ -154,10 +161,16 @@ def main():
             lo, v, t = run_model(fwd, x, a.arch)
         lo = lo.float().masked_fill(~x["legal"], float("-inf"))
         lp = F.cross_entropy(lo, x["target"])
+        if teacher is not None:
+            pt = teacher_logprobs(teacher, x["maia_x"], x["se"], x["oe"], x["legal"]).exp()
+            ls = -(pt * torch.log_softmax(lo, 1).masked_fill(~x["legal"], 0)).sum(1).mean()
+            lpol = (1 - a.distill_w) * lp + a.distill_w * ls
+        else:
+            lpol = lp
         lv = F.cross_entropy(v.float(), x["wdl"])
         tm = x["spent"] >= 0
         lt = F.cross_entropy(t.float()[tm], time_bucket(x["spent"][tm])) if t is not None and tm.any() else lo.new_zeros(())
-        loss = lp + a.value_w * lv + a.time_w * lt
+        loss = lpol + a.value_w * lv + a.time_w * lt
         opt.zero_grad(set_to_none=True)
         loss.backward()
         gn = torch.nn.utils.clip_grad_norm_(model.parameters(), a.clip)

@@ -16,7 +16,9 @@ VOCAB = 4352  # 64*64 from-to + 8*8*4 promotions, Maia-3 compatible
 
 def _load():
     if SRC.exists() and (not LIB.exists() or LIB.stat().st_mtime < SRC.stat().st_mtime):
-        subprocess.check_call(["gcc", "-O3", "-march=native", "-shared", "-fPIC", "-o", str(LIB), str(SRC)])
+        tmp = LIB.with_suffix(f".{os.getpid()}.tmp")  # atomic swap: running processes keep their mapping
+        subprocess.check_call(["gcc", "-O3", "-march=native", "-shared", "-fPIC", "-o", str(tmp), str(SRC)])
+        os.replace(tmp, LIB)
     lib = ctypes.CDLL(str(LIB))
     P = np.ctypeslib.ndpointer
     lib.cb_parse_games.restype = ctypes.c_int64
@@ -28,6 +30,11 @@ def _load():
     lib.cb_build_maia.restype = ctypes.c_int
     lib.cb_build_maia.argtypes = [P(np.uint16), P(np.int64), P(np.int64), P(np.int32), ctypes.c_int, ctypes.c_int,
                                   P(np.uint64)]
+    lib.cb_encode_position.restype = ctypes.c_int
+    lib.cb_encode_position.argtypes = [ctypes.c_char_p, P(np.uint16), ctypes.c_int, ctypes.c_int, P(np.int8),
+                                       P(np.int16), P(np.int8), P(np.uint8), P(np.uint16)]
+    lib.cb_vocab_index.restype = ctypes.c_int
+    lib.cb_vocab_index.argtypes = [ctypes.c_uint16, ctypes.c_int]
     lib.cb_legal_after.restype = ctypes.c_int
     lib.cb_legal_after.argtypes = [P(np.uint16), ctypes.c_int, P(np.uint16)]
     return lib
@@ -84,3 +91,18 @@ def legal_after(moves: np.ndarray) -> np.ndarray:
     out = np.empty(256, np.uint16)
     n = lib.cb_legal_after(np.ascontiguousarray(moves, np.uint16), len(moves), out)
     return out[:n].copy()
+
+
+def encode_position(fen: str | None, moves: np.ndarray, H: int = 64):
+    """One engine position: (board, meta, hist, legal bitmask, legal packed moves) or None if illegal."""
+    board = np.empty(64, np.int8); meta = np.empty(8, np.int16); hist = np.empty((H, 4), np.int8)
+    legal = np.empty(VOCAB // 8, np.uint8); out = np.empty(256, np.uint16)
+    mv = np.ascontiguousarray(moves, np.uint16)
+    n = lib.cb_encode_position((fen or "").encode(), mv, len(mv), H, board, meta, hist, legal, out)
+    if n < 0:
+        return None
+    return board, meta, hist, legal, out[:n].copy()
+
+
+def vocab_index(move: int, black: bool) -> int:
+    return lib.cb_vocab_index(int(move), int(black))
