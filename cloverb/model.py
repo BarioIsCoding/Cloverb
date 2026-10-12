@@ -27,10 +27,12 @@ try:  # fused AVX-512 attention for 64-token boards (csrc/attn64.c); SDPA fallba
     with open("/proc/cpuinfo") as _f:
         _HAS_AVX512 = "avx512f" in _f.read()
     if _HAS_AVX512:
-        from .attn import attn64
+        from .attn import attn64, attn64qkv
     FUSED_ATTN = _HAS_AVX512
 except Exception:  # pragma: no cover
     FUSED_ATTN = False
+
+FUSED_QKV = True  # norm/permute/transpose fused into the attention kernel (csrc/attn64.c)
 
 VOCAB = 4352
 ELO_ANCHORS = torch.arange(400.0, 3201.0, 200.0)          # 15 hat functions
@@ -139,6 +141,19 @@ class Block(nn.Module):
             h = self.norm1(x) * (1 + s1) + b1
         else:
             h = self.norm1(x)
+        if FUSED_ATTN and FUSED_QKV:
+            qkv = self.qkv(h)
+            coef = (self.dyn(torch.cat([x.mean(1), c], -1)).view(B, self.h, -1) if self.dyn is not None
+                    else x.new_zeros(B, self.h, 0, dtype=torch.float32))
+            stat = self.static if self.static is not None else x.new_zeros(self.h, 64, 64, dtype=torch.float32)
+            tm = templates if (templates is not None and self.dyn is not None) else x.new_zeros(0, 4096, dtype=torch.float32)
+            eps = torch.finfo(qkv.dtype).eps  # matches F.rms_norm(eps=None) on the unfused path
+            a = self.proj(attn64qkv(qkv, self.q_norm.weight, self.k_norm.weight, stat, coef, tm, self.h,
+                                    self.dh ** -0.5, eps))
+            x = x + (a * (1 + g1) if self.adaln is not None else a)
+            h = self.norm2(x) * (1 + s2) + b2 if self.adaln is not None else self.norm2(x)
+            m = self.fc2(F.relu(self.fc1(h)).square())
+            return x + (m * (1 + g2) if self.adaln is not None else m)
         q, k, v = self.qkv(h).view(B, 64, 3, self.h, self.dh).permute(2, 0, 3, 1, 4)
         q, k = self.q_norm(q), self.k_norm(k)
         if FUSED_ATTN:

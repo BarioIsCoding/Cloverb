@@ -268,3 +268,164 @@ int attn64_bwd(const void *q, const void *k, const void *v, const void *o, const
 }
 
 int attn64_threads(void) { return omp_get_max_threads(); }
+
+// ----------------------------------------------------------------------------------------------------
+// qkv-fused variant: reads the raw projection qkv [B, 64, 3*d] (row = q | k | v, heads contiguous within
+// each), applies per-head RMSNorm with weights wq, wk (shared across heads, length D) to q and k, and writes
+// o directly as [B, 64, d]. Saves the permute / norm / contiguous / transpose passes around attention.
+static void load_qkv_rows(float *Q, float *K, float *Kt, float *V, float *Vt, float *rq, float *rk, float *Qr, float *Kr,
+                          const void *qkv, int64_t base, int64_t rstride, int D, int bf16, const float *wq,
+                          const float *wk, float eps, int d) {
+    for (int i = 0; i < L; i++) {
+        int64_t r = base + i * rstride;
+        __m512 sq = _mm512_setzero_ps(), sk = sq;
+        for (int c = 0; c < D; c += 16) {
+            __m512 a = load16(qkv, r + c, bf16), b = load16(qkv, r + d + c, bf16);
+            _mm512_store_ps(Qr + i * D + c, a); _mm512_store_ps(Kr + i * D + c, b);
+            sq = _mm512_fmadd_ps(a, a, sq); sk = _mm512_fmadd_ps(b, b, sk);
+            _mm512_store_ps(V + i * D + c, load16(qkv, r + 2 * d + c, bf16));
+        }
+        float iq = 1.0f / sqrtf(_mm512_reduce_add_ps(sq) / D + eps), ik = 1.0f / sqrtf(_mm512_reduce_add_ps(sk) / D + eps);
+        rq[i] = iq; rk[i] = ik;
+        __m512 vq = _mm512_set1_ps(iq), vk = _mm512_set1_ps(ik);
+        for (int c = 0; c < D; c += 16) {
+            _mm512_store_ps(Q + i * D + c, _mm512_mul_ps(_mm512_mul_ps(_mm512_load_ps(Qr + i * D + c), vq), _mm512_loadu_ps(wq + c)));
+            _mm512_store_ps(K + i * D + c, _mm512_mul_ps(_mm512_mul_ps(_mm512_load_ps(Kr + i * D + c), vk), _mm512_loadu_ps(wk + c)));
+        }
+    }
+    __m512i idx = _mm512_mullo_epi32(_mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15), _mm512_set1_epi32(D));
+    for (int dd = 0; dd < D; dd++)
+        for (int i = 0; i < L; i += 16) {
+            _mm512_store_ps(Kt + dd * L + i, _mm512_i32gather_ps(idx, K + i * D + dd, 4));
+            if (Vt) _mm512_store_ps(Vt + dd * L + i, _mm512_i32gather_ps(idx, V + i * D + dd, 4));
+        }
+}
+
+int attn64qkv_fwd(const void *qkv, const float *wq, const float *wk, const float *stat, const float *coef,
+                  const float *tmpl, int B, int H, int D, int T, float scale, float eps, int bf16, void *o) {
+    if (D % 16 || D > 64) return 1;
+    int d = H * D;
+#pragma omp parallel
+    {
+        Scratch s = scratch_new();
+        float *Qr = falloc(), *Kr = falloc();
+        float rq[L], rk[L];
+#pragma omp for schedule(static)
+        for (int bh = 0; bh < B * H; bh++) {
+            int b = bh / H, h = bh % H;
+            int64_t base = (int64_t)b * L * 3 * d + (int64_t)h * D;
+            load_qkv_rows(s.Q, s.K, s.Kt, s.V, NULL, rq, rk, Qr, Kr, qkv, base, 3 * d, D, bf16, wq, wk, eps, d);
+            mm_XYt(s.S, s.Q, s.Kt, D, scale);
+            bias_softmax(s.S, stat ? stat + (int64_t)h * L * L : NULL, coef + (int64_t)bh * T, tmpl, T);
+            mm_AX(s.O, s.S, s.V, D, 1.0f);
+            int64_t ob = (int64_t)b * L * d + (int64_t)h * D;
+            for (int i = 0; i < L; i++)
+                for (int c = 0; c < D; c += 16) store16(o, ob + (int64_t)i * d + c, _mm512_load_ps(s.O + i * D + c), bf16);
+        }
+        free(Qr); free(Kr);
+        scratch_free(&s);
+    }
+    return 0;
+}
+
+// Backward: dqkv [B,64,3d] (dtype like qkv), dwq, dwk [D], dstat, dcoef, dtmpl as in attn64_bwd.
+// partial: nthreads * ((H + T) * 4096 + 2 * D) floats.
+int attn64qkv_bwd(const void *qkv, const float *wq, const float *wk, const void *o, const void *dout, const float *stat,
+                  const float *coef, const float *tmpl, int B, int H, int D, int T, float scale, float eps, int bf16,
+                  void *dqkv, float *dwq, float *dwk, float *dstat, float *dcoef, float *dtmpl, float *partial) {
+    if (D % 16 || D > 64) return 1;
+    int d = H * D, nt = omp_get_max_threads();
+    int64_t per = (int64_t)(H + T) * L * L + 2 * D;
+#pragma omp parallel
+    {
+        Scratch s = scratch_new();
+        float *Qr = falloc(), *Kr = falloc();
+        float rq[L], rk[L];
+        float Dv[L] __attribute__((aligned(64)));
+        float *my = partial + per * omp_get_thread_num();
+        memset(my, 0, sizeof(float) * per);
+        float *mwq = my + (int64_t)(H + T) * L * L, *mwk = mwq + D;
+#pragma omp for schedule(static)
+        for (int bh = 0; bh < B * H; bh++) {
+            int b = bh / H, h = bh % H;
+            const float *cf = coef + (int64_t)bh * T;
+            int64_t base = (int64_t)b * L * 3 * d + (int64_t)h * D, ob = (int64_t)b * L * d + (int64_t)h * D;
+            load_qkv_rows(s.Q, s.K, s.Kt, s.V, s.Vt, rq, rk, Qr, Kr, qkv, base, 3 * d, D, bf16, wq, wk, eps, d);
+            for (int i = 0; i < L; i++)
+                for (int c = 0; c < D; c += 16) {
+                    _mm512_store_ps(s.O + i * D + c, load16(o, ob + (int64_t)i * d + c, bf16));
+                    _mm512_store_ps(s.dO + i * D + c, load16(dout, ob + (int64_t)i * d + c, bf16));
+                }
+            mm_XYt(s.S, s.Q, s.Kt, D, scale);
+            bias_softmax(s.S, stat ? stat + (int64_t)h * L * L : NULL, cf, tmpl, T);
+            for (int i = 0; i < L; i++) {
+                __m512 acc = _mm512_setzero_ps();
+                for (int c = 0; c < D; c += 16)
+                    acc = _mm512_fmadd_ps(_mm512_load_ps(s.dO + i * D + c), _mm512_load_ps(s.O + i * D + c), acc);
+                Dv[i] = _mm512_reduce_add_ps(acc);
+            }
+            mm_XYt(s.dP, s.dO, s.Vt, D, 1.0f);
+            float *ms = my + (int64_t)h * L * L;
+            for (int i = 0; i < L; i++) {
+                __m512 dd = _mm512_set1_ps(Dv[i]);
+                for (int c = 0; c < L; c += 16) {
+                    int x = i * L + c;
+                    __m512 g = _mm512_mul_ps(_mm512_load_ps(s.S + x), _mm512_sub_ps(_mm512_load_ps(s.dP + x), dd));
+                    _mm512_store_ps(s.dP + x, g);
+                    _mm512_storeu_ps(ms + x, _mm512_add_ps(_mm512_loadu_ps(ms + x), g));
+                }
+            }
+            for (int t = 0; t < T; t++) {
+                const float *tp = tmpl + (int64_t)t * L * L;
+                float *mt = my + (int64_t)(H + t) * L * L;
+                __m512 c = _mm512_set1_ps(cf[t]), acc = _mm512_setzero_ps();
+                for (int x = 0; x < L * L; x += 16) {
+                    __m512 g = _mm512_load_ps(s.dP + x);
+                    acc = _mm512_fmadd_ps(g, _mm512_loadu_ps(tp + x), acc);
+                    _mm512_storeu_ps(mt + x, _mm512_fmadd_ps(c, g, _mm512_loadu_ps(mt + x)));
+                }
+                dcoef[(int64_t)bh * T + t] = _mm512_reduce_add_ps(acc);
+            }
+            mm_AtX(s.dV, s.S, s.dO, D, 1.0f);
+            mm_AX(s.dQ, s.dP, s.K, D, scale);      // grad wrt normalised q
+            mm_AtX(s.dK, s.dP, s.Q, D, scale);     // grad wrt normalised k
+            // RMSNorm backward: y = x r w, r = (mean x^2 + eps)^-1/2
+            // dx = r (w dy) - x r^3 / D * sum(w dy x);  dw += dy x r
+            for (int pass = 0; pass < 2; pass++) {
+                const float *G = pass ? s.dK : s.dQ, *X = pass ? Kr : Qr, *w = pass ? wk : wq, *rr = pass ? rk : rq;
+                float *mw = pass ? mwk : mwq;
+                int64_t col = pass ? d : 0;
+                for (int i = 0; i < L; i++) {
+                    __m512 dot = _mm512_setzero_ps();
+                    __m512 r = _mm512_set1_ps(rr[i]);
+                    for (int c = 0; c < D; c += 16) {
+                        __m512 g = _mm512_load_ps(G + i * D + c), x = _mm512_load_ps(X + i * D + c), ww = _mm512_loadu_ps(w + c);
+                        dot = _mm512_fmadd_ps(_mm512_mul_ps(ww, g), x, dot);
+                        _mm512_storeu_ps(mw + c, _mm512_fmadd_ps(_mm512_mul_ps(g, x), r, _mm512_loadu_ps(mw + c)));
+                    }
+                    float k3 = _mm512_reduce_add_ps(dot) * rr[i] * rr[i] * rr[i] / D;
+                    __m512 vk3 = _mm512_set1_ps(k3);
+                    for (int c = 0; c < D; c += 16) {
+                        __m512 g = _mm512_load_ps(G + i * D + c), x = _mm512_load_ps(X + i * D + c), ww = _mm512_loadu_ps(w + c);
+                        __m512 dx = _mm512_sub_ps(_mm512_mul_ps(_mm512_mul_ps(ww, g), r), _mm512_mul_ps(x, vk3));
+                        store16(dqkv, base + (int64_t)i * 3 * d + col + c, dx, bf16);
+                    }
+                }
+            }
+            for (int i = 0; i < L; i++)
+                for (int c = 0; c < D; c += 16)
+                    store16(dqkv, base + (int64_t)i * 3 * d + 2 * d + c, _mm512_load_ps(s.dV + i * D + c), bf16);
+        }
+        free(Qr); free(Kr);
+        scratch_free(&s);
+    }
+    int64_t nH = (int64_t)H * L * L, nT = (int64_t)T * L * L;
+#pragma omp parallel for schedule(static)
+    for (int64_t x = 0; x < nH + nT + 2 * D; x++) {
+        float acc = 0.f;
+        for (int th = 0; th < nt; th++) acc += partial[per * th + x];
+        if (x < nH) dstat[x] = acc; else if (x < nH + nT) dtmpl[x - nH] = acc;
+        else if (x < nH + nT + D) dwq[x - nH - nT] = acc; else dwk[x - nH - nT - D] = acc;
+    }
+    return 0;
+}
