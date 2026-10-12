@@ -95,6 +95,31 @@ def make_inputs(gs: GameStore, g: np.ndarray, ply: np.ndarray, H: int = 64, lega
 MODEL_KEYS = ("board", "meta", "hist", "elo", "base", "inc", "clock")
 
 
+class PoolSampler:
+    """Epochs over teacher-labelled pools (tools/label_teacher.py): yields (game, ply, soft target)."""
+
+    def __init__(self, paths: list[str], stores: list[str], seed: int = 0, vocab: int = 4352):
+        zs = [np.load(p) for p in paths]
+        for z in zs:
+            assert list(z["stores"]) == list(stores), "pool was labelled against a different store list"
+        self.g = np.concatenate([z["game"] for z in zs]); self.p = np.concatenate([z["ply"] for z in zs])
+        self.idx = np.concatenate([z["idx"] for z in zs]).astype(np.int64)
+        pr = np.concatenate([z["prob"] for z in zs]).astype(np.float32)
+        self.prob = pr / pr.sum(1, keepdims=True)
+        self.rng = np.random.default_rng(seed)
+        self.order, self.pos, self.vocab, self.epoch = self.rng.permutation(len(self.g)), 0, vocab, 0
+
+    def sample(self, B: int):
+        if self.pos + B > len(self.order):
+            self.order, self.pos = self.rng.permutation(len(self.g)), 0
+            self.epoch += 1
+        r = self.order[self.pos:self.pos + B]
+        self.pos += B
+        soft = torch.zeros(B, self.vocab)
+        soft.scatter_(1, torch.from_numpy(self.idx[r]), torch.from_numpy(self.prob[r]))
+        return self.g[r], self.p[r], soft
+
+
 class Prefetcher:
     """Background thread building batches (the C builder releases the GIL)."""
 
@@ -105,8 +130,12 @@ class Prefetcher:
         def run():
             try:
                 while not self.stop:
-                    g, ply = sampler.sample(B)
+                    smp = sampler.sample(B)
+                    g, ply = smp[0], smp[1]
                     x = make_inputs(gs, g, ply, H)
+                    x["g"], x["ply"] = g, ply
+                    if len(smp) > 2:
+                        x["soft"] = smp[2]
                     if extra is not None:
                         x.update(extra(gs, g, ply))
                     self.q.put(x)

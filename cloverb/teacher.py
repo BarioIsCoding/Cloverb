@@ -18,6 +18,7 @@ MODELS = "/home/user/models/maia3"
 CONFIGS = {
     "maia3-5m": ("maia3-5m.pt", dict(d=256, h=8, gen=64, psq=0, inter=64)),
     "maia3-23m": ("maia3-23m.pt", dict(d=512, h=16, gen=128, psq=32, inter=128)),
+    "maia3-23m-ponder": ("maia3-23m-ponder.pt", dict(d=512, h=16, gen=128, psq=32, inter=128, time=True)),
     "maia3-79m": ("maia3-79m.pt", dict(d=1024, h=32, gen=128, psq=32, inter=128)),
 }
 
@@ -31,8 +32,11 @@ class FastMaia3(nn.Module):
         self.c = c
         d, L = c["d"], 8
         self.H = 8
+        self.time = c.get("time", False)
+        nt = 3 if self.time else 0                                      # base/100, inc/100, clock/100
         self.wtok = nn.Parameter(sd["token_projection.weight"][:, :96].clone())
-        we = sd["token_projection.weight"][:, 96:]                      # d, 256 (self 128, oppo 128)
+        self.wtime = nn.Parameter(sd["token_projection.weight"][:, 96:96 + nt].clone()) if self.time else None
+        we = sd["token_projection.weight"][:, 96 + nt:]                 # d, 256 (self 128, oppo 128)
         lo, hi = sd["elo_embedding_low.weight"][0], sd["elo_embedding_high.weight"][0]
         # interpolate_elo(e) = (e/5000)*lo + (1 - e/5000)*hi  ->  token bias is affine in each Elo
         self.register_buffer("b0", sd["token_projection.bias"] + we[:, :128] @ hi + we[:, 128:] @ hi)
@@ -81,11 +85,14 @@ class FastMaia3(nn.Module):
         y = m.ln2(y).view(B, self.c["h"], self.c["gen"])
         return (y @ self.templates).view(B, self.c["h"], 64, 64)
 
-    def forward(self, x, self_elo, oppo_elo):
-        """x float[B,64,96] Maia-3 planes (8 boards), Elo long/float [B] -> logits float[B,4352]."""
+    def forward(self, x, self_elo, oppo_elo, time=None):
+        """x float[B,64,96] Maia-3 planes (8 boards), Elo long/float [B], time float[B,3] seconds
+        (base, increment, clock; ponder model only) -> logits float[B,4352]."""
         B, d, h = x.shape[0], self.d, self.c["h"]
         se, oe = self_elo.float().clamp(0, 5000), oppo_elo.float().clamp(0, 5000)
         x = x @ self.wtok.T + self.b0 + se[:, None, None] * self.bs + oe[:, None, None] * self.bo
+        if self.time:
+            x = x + ((time.float() / 100) @ self.wtime.T)[:, None, :]
         for m in self.layers:
             bias = self.gab(m, x).to(x.dtype)
             q, k, v = m.qkv(x).view(B, 64, 3, h, d // h).permute(2, 0, 3, 1, 4)
@@ -103,9 +110,9 @@ class FastMaia3(nn.Module):
             return torch.cat([base.reshape(B, 4096), pl], 1)
 
 
-def teacher_logprobs(model, x, se, oe, legal: torch.Tensor, bf16=True):
+def teacher_logprobs(model, x, se, oe, legal: torch.Tensor, bf16=True, time=None):
     """Legal-masked log-probabilities of a Maia-3 teacher."""
     with torch.inference_mode(), torch.autocast("cpu", dtype=torch.bfloat16, enabled=bf16):
-        lo = model(x, se, oe)
+        lo = model(x, se, oe, time)
     lo = lo.float().masked_fill(~legal, float("-inf"))
     return torch.log_softmax(lo, 1)

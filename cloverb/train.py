@@ -16,7 +16,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from .data import MODEL_KEYS, Prefetcher, Sampler, SamplerConfig, concat_stores, make_inputs
+from .data import MODEL_KEYS, PoolSampler, Prefetcher, Sampler, SamplerConfig, concat_stores, make_inputs
 from .gamestore import GameStore
 from .model import Cloverb, CloverbConfig, count_params, time_bucket
 
@@ -111,6 +111,9 @@ def main():
     ap.add_argument("--max-hours", type=float, default=1e9)
     ap.add_argument("--teacher", default=None, help="maia3-5m | maia3-23m | maia3-79m (online distillation)")
     ap.add_argument("--distill-w", type=float, default=0.5, help="weight of teacher soft-CE vs human-move CE")
+    ap.add_argument("--teacher-cache", nargs="*", default=None, help="teacher-labelled pools (label_teacher.py)")
+    ap.add_argument("--distill-w-pressure", type=float, default=None,
+                    help="distillation weight when the mover has < 30 s (Maia-3 never trained there)")
     a = ap.parse_args()
 
     torch.set_num_threads(a.threads)
@@ -139,7 +142,11 @@ def main():
 
     gs = concat_stores(a.stores)
     print(f"train store: {gs.n_games} games, {len(gs.moves)} plies", flush=True)
-    sampler = Sampler(gs, SamplerConfig(elo_alpha=a.elo_alpha, seed=a.seed + step))
+    if a.teacher_cache:
+        sampler = PoolSampler(a.teacher_cache, a.stores, seed=a.seed + step)
+        print(f"teacher pool: {len(sampler.g)} positions", flush=True)
+    else:
+        sampler = Sampler(gs, SamplerConfig(elo_alpha=a.elo_alpha, seed=a.seed + step))
     need_maia = a.arch == "chessformer" or a.teacher is not None
     pf = Prefetcher(gs, sampler, a.batch, a.hist, extra=maia_extra if need_maia else None)
     teacher = None
@@ -161,10 +168,18 @@ def main():
             lo, v, t = run_model(fwd, x, a.arch)
         lo = lo.float().masked_fill(~x["legal"], float("-inf"))
         lp = F.cross_entropy(lo, x["target"])
-        if teacher is not None:
-            pt = teacher_logprobs(teacher, x["maia_x"], x["se"], x["oe"], x["legal"]).exp()
-            ls = -(pt * torch.log_softmax(lo, 1).masked_fill(~x["legal"], 0)).sum(1).mean()
-            lpol = (1 - a.distill_w) * lp + a.distill_w * ls
+        if teacher is not None or "soft" in x:
+            if "soft" in x:
+                pt = x["soft"]
+            else:
+                tm = torch.stack([x["base"], x["inc"], x["clock"]], 1)
+                pt = teacher_logprobs(teacher, x["maia_x"], x["se"], x["oe"], x["legal"], time=tm).exp()
+            ls_i = -(pt * torch.log_softmax(lo, 1).masked_fill(~x["legal"], 0)).sum(1)
+            lp_i = F.cross_entropy(lo, x["target"], reduction="none")
+            w = torch.full_like(ls_i, a.distill_w)
+            if a.distill_w_pressure is not None:
+                w = torch.where(x["clock"] < 30, torch.full_like(w, a.distill_w_pressure), w)
+            lpol = ((1 - w) * lp_i + w * ls_i).mean()
         else:
             lpol = lp
         lv = F.cross_entropy(v.float(), x["wdl"])
