@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+cloverb/libcloverb.so
+*.tmp
+/runs/
+/data/
+results/maia3/suite.log

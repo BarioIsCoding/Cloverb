@@ -1,0 +1,19 @@
+{
+  "variant": "hist1",
+  "params": 5208580,
+  "positions": 100016,
+  "top1": 0.5379439289713646,
+  "top1_ci": 0.0030898484323604565,
+  "top3": 0.8133998560230363,
+  "top3_ci": 0.0024145119736689188,
+  "ce": 1.4101978540420532,
+  "history": 1,
+  "history_mode": "own",
+  "dtype": "bf16",
+  "seconds": 253.54778656300005,
+  "forward_seconds": 247.85341157699872,
+  "pos_per_s": 394.46607424888174,
+  "store": "/home/user/data/bench/allie2022.npz",
+  "subset": "/home/user/data/bench/allie_sub100k.npy",
+  "protocol": "maia"
+}
