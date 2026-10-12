@@ -42,6 +42,9 @@ def run_model(model, x, arch):
     if arch == "chessformer":
         lo, v = model(x["maia_x"], x["se"], x["oe"])
         return lo, v, None
+    m = getattr(model, "_orig_mod", model)
+    if getattr(getattr(m, "cfg", None), "opp_elo", False):
+        return model(*(x[k] for k in MODEL_KEYS), x["oelo"])
     return model(*(x[k] for k in MODEL_KEYS))
 
 
@@ -89,6 +92,12 @@ def main():
     ap.add_argument("--templates", type=int, default=32)
     ap.add_argument("--no-static", action="store_true")
     ap.add_argument("--no-adaln", action="store_true")
+    ap.add_argument("--act", default="relu2", choices=["relu2", "gelu"])
+    ap.add_argument("--geo-init", action="store_true")
+    ap.add_argument("--small-init", action="store_true", help="small normal instead of zero init of residual outputs")
+    ap.add_argument("--cap-type", action="store_true", help="history encodes the captured piece type")
+    ap.add_argument("--postln", action="store_true", help="post-norm blocks")
+    ap.add_argument("--opp-elo", action="store_true", help="diagnostic: condition on the opponent's Elo too")
     ap.add_argument("--hist", type=int, default=64)
     ap.add_argument("--batch", type=int, default=512)
     ap.add_argument("--steps", type=int, default=100000)
@@ -120,7 +129,9 @@ def main():
     torch.manual_seed(a.seed)
     out = Path(a.out); out.mkdir(parents=True, exist_ok=True)
     cfg = CloverbConfig(d=a.d, layers=a.layers, heads=a.heads, mlp_mult=a.mlp, hist=a.hist, n_templates=a.templates,
-                        static_bias=not a.no_static, adaln=not a.no_adaln)
+                        static_bias=not a.no_static, adaln=not a.no_adaln, act=a.act, geo_init=a.geo_init,
+                        opp_elo=a.opp_elo, zero_init=not a.small_init, cap_type=a.cap_type,
+                        postln=a.postln)
     if a.arch == "chessformer":
         from .baseline import Chessformer
         model = Chessformer(a.cf_size)

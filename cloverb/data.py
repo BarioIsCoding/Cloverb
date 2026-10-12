@@ -79,10 +79,11 @@ def make_inputs(gs: GameStore, g: np.ndarray, ply: np.ndarray, H: int = 64, lega
     k = gs.offsets[g] + ply
     white = (ply % 2 == 0)
     elo = np.where(white, gs.welo[g], gs.belo[g]).astype(np.float32)
+    oelo = np.where(white, gs.belo[g], gs.welo[g]).astype(np.float32)
     res = gs.result[g].astype(np.int64) * np.where(white, 1, -1)          # +1 mover won
     out = dict(
         board=torch.from_numpy(b.board), meta=torch.from_numpy(b.meta), hist=torch.from_numpy(b.hist),
-        elo=torch.from_numpy(elo), base=torch.from_numpy(gs.base[g].astype(np.float32)),
+        elo=torch.from_numpy(elo), oelo=torch.from_numpy(oelo), base=torch.from_numpy(gs.base[g].astype(np.float32)),
         inc=torch.from_numpy(gs.inc[g].astype(np.float32)), clock=torch.from_numpy(gs.clock[k].astype(np.float32)),
         target=torch.from_numpy(b.target.astype(np.int64)), wdl=torch.from_numpy(res + 1),
         spent=torch.from_numpy(np.where(ply >= 2, gs.spent[k].astype(np.int32), -1).astype(np.float32)),

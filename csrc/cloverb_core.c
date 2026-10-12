@@ -319,7 +319,8 @@ static inline int vocab_index(Move m, int black) {
 // (board flipped vertically and colours swapped when black is to move):
 //   board  int8[B,64]   0 empty, 1..6 own P N B R Q K, 7..12 opponent
 //   meta   int16[B,8]   own K-castle, own Q-castle, opp K, opp Q, ep square (-1), halfmove, fullmove, in_check
-//   hist   int8[B,H,4]  j-th previous ply (j=1..H): from, to, moved piece type 0..5, capture flag; -1 if none
+//   hist   int8[B,H,4]  j-th previous ply (j=1..H): from, to, moved piece type 0..5, captured piece
+//                        type 1..5 (0 = no capture); -1 if none
 //   legal  uint8[B,4352/8] little-endian bitmask over the 4352-move vocabulary (NULL to skip)
 //   target int16[B]     vocabulary index of the move played at `ply` (-1 if ply == game length)
 // Returns 0, or 1 + index of the first sample whose stored game holds an illegal move.
@@ -337,7 +338,7 @@ int cb_build_batch(const uint16_t *moves, const int64_t *goff, const int64_t *gi
             int pc = B.sq[m.from];
             if (pc == EMPTY || COLOR(pc) != B.stm) return 1 + b;
             ptype[k] = TYPE(pc) - 1;
-            pcap[k] = B.sq[m.to] != EMPTY || (TYPE(pc) == PAWN && m.to == B.ep);
+            pcap[k] = B.sq[m.to] != EMPTY ? TYPE(B.sq[m.to]) : ((TYPE(pc) == PAWN && m.to == B.ep) ? PAWN : 0);
             make_move(&B, m);
         }
         int black = B.stm, c = B.stm;
@@ -477,7 +478,7 @@ int cb_encode_position(const char *fen, const uint16_t *mv, int nmoves, int H, i
         if (!ok) return -1;
         int pc = B.sq[m.from];
         ptype[k] = TYPE(pc) - 1;
-        pcap[k] = B.sq[m.to] != EMPTY || (TYPE(pc) == PAWN && m.to == B.ep);
+        pcap[k] = B.sq[m.to] != EMPTY ? TYPE(B.sq[m.to]) : ((TYPE(pc) == PAWN && m.to == B.ep) ? PAWN : 0);
         make_move(&B, m);
     }
     int black = B.stm, c = B.stm;

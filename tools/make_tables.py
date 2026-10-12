@@ -41,6 +41,52 @@ Checkpoint & Params & Paper top-1 & Top-1 & Top-3 & CE (nats)\\\midrule
     (OUT / "nohist_cost.tex").write_text(f"{100 * (a['top1'] - b['top1']):.1f}")
 
 
+def run_curve(log):
+    return {d["positions_seen"]: d["eval_ema"] for d in (json.loads(l) for l in open(log)) if "eval_ema" in d}
+
+
+def arch_table(runs):
+    """runs: [(label, log path, pos/s)] -> top-1 / CE at each evaluated sample count."""
+    cols = sorted({n for _, p, _ in runs for n in run_curve(p)})
+    head = " & ".join(f"{n / 1e6:.2f}M" for n in cols)
+    rows = []
+    for lab, p, speed in runs:
+        c = run_curve(p)
+        cells = " & ".join(f"{100 * c[n]['top1']:.1f} / {c[n]['ce']:.2f}" if n in c else "--" for n in cols)
+        rows.append(f"{lab} & {speed} & {cells} \\\\")
+    tex = (r"\begin{table}[t]\centering\small" "\n"
+           r"\caption{Equal-data comparison on the ALLIE 10k sample (EMA weights): top-1 (\%) / cross-entropy after "
+           r"$N$ training positions, same data stream and evaluation for all runs; throughput is end-to-end training "
+           r"positions per second on the 4-core CPU.}\label{tab:arch}" "\n"
+           r"\begin{tabular}{lr" + "c" * len(cols) + r"}\toprule" "\n"
+           f"Run & pos/s & {head}\\\\\\midrule\n" + "\n".join(rows) + "\n\\bottomrule\\end{tabular}\\end{table}\n")
+    (OUT / "arch.tex").write_text(tex)
+
+
+def main_table(sets, models):
+    """sets: [(label, file stem)], models: [(label, results dir, file prefix)] -> top-1/top-3/CE per set."""
+    rows = []
+    for mlab, d, pre in models:
+        cells = []
+        for _, stem in sets:
+            f = Path(d) / f"{pre}{stem}.json"
+            if f.exists():
+                x = j(f)
+                cells.append(f"{100 * x['top1']:.2f} & {100 * x['top3']:.1f}")
+            else:
+                cells.append("-- & --")
+        rows.append(f"{mlab} & " + " & ".join(cells) + " \\\\")
+    head = " & ".join(f"\\multicolumn{{2}}{{c}}{{{lab}}}" for lab, _ in sets)
+    sub = " & ".join(["top-1 & top-3"] * len(sets))
+    tex = (r"\begin{table*}[t]\centering\small" "\n"
+           r"\caption{Move matching (\%) on every test set. ALLIE: 2022 blitz (Maia protocol = first 10 plies and "
+           r"time pressure removed; all = every ply of the same games). Fresh: September 2026 games, unseen by every "
+           r"model.}\label{tab:main}" "\n"
+           r"\begin{tabular}{l" + "rr" * len(sets) + r"}\toprule" "\n"
+           f" & {head}\\\\\n & {sub}\\\\\\midrule\n" + "\n".join(rows) + "\n\\bottomrule\\end{tabular}\\end{table*}\n")
+    (OUT / "main.tex").write_text(tex)
+
+
 if __name__ == "__main__":
     maia3_suite()
     print("tables written to", OUT)

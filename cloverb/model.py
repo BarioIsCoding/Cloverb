@@ -52,6 +52,12 @@ class CloverbConfig:
     static_bias: bool = True
     adaln: bool = True
     value_hidden: int = 128
+    act: str = "relu2"             # MLP activation: relu2 | gelu
+    geo_init: bool = False         # initialise static attention biases with chess move patterns
+    opp_elo: bool = False          # diagnostic only: also condition on the opponent's Elo
+    zero_init: bool = True         # zero-init residual output projections (else small normal init)
+    cap_type: bool = False         # history knows which piece was captured (else only that one was)
+    postln: bool = False           # post-norm blocks (norm after each residual add), as in Chessformer
 
     def to_dict(self):
         return asdict(self)
@@ -68,6 +74,7 @@ def hat(x: torch.Tensor, anchors: torch.Tensor) -> torch.Tensor:
 
 
 N_COND = 15 + 14 + 6 + 4 + 2
+N_COND_OPP = N_COND + 15
 
 
 def cond_features(elo, base, inc, clock, meta, hist_len):
@@ -99,6 +106,31 @@ class RMSNorm(nn.Module):
         return F.rms_norm(x, (self.d,), self.weight)
 
 
+def geometry_bias(h: int, strength: float = 2.0) -> torch.Tensor:
+    """Per-head 64x64 attention-bias prior from chess geometry (query square i attends key square j):
+    rook lines, bishop diagonals, knight jumps, king neighbourhood, pawn-attack squares, same file,
+    Chebyshev-distance decay; remaining heads start at zero."""
+    sq = torch.arange(64)
+    f, r = sq % 8, sq // 8
+    df, dr = f[None, :] - f[:, None], r[None, :] - r[:, None]
+    adf, adr = df.abs(), dr.abs()
+    off = (adf + adr) > 0
+    pats = [
+        ((adf == 0) | (adr == 0)) & off,                       # rook / queen lines
+        (adf == adr) & off,                                    # bishop / queen diagonals
+        ((adf == 1) & (adr == 2)) | ((adf == 2) & (adr == 1)), # knight
+        (torch.maximum(adf, adr) == 1),                        # king
+        (adf == 1) & (dr.abs() == 1),                          # pawn attacks (both directions)
+        (adf == 0) & off,                                      # same file (pawn structure)
+    ]
+    out = torch.zeros(h, 64, 64)
+    for k in range(min(h, len(pats))):
+        out[k] = strength * pats[k].float()
+    if h > len(pats):
+        out[len(pats)] = -0.5 * torch.maximum(adf, adr).float()   # locality
+    return out
+
+
 class Block(nn.Module):
     def __init__(self, cfg: CloverbConfig):
         super().__init__()
@@ -122,7 +154,18 @@ class Block(nn.Module):
             nn.init.zeros_(self.dyn.weight); nn.init.zeros_(self.dyn.bias)
         else:
             self.dyn = None
-        nn.init.zeros_(self.proj.weight); nn.init.zeros_(self.fc2.weight)
+        if cfg.zero_init:
+            nn.init.zeros_(self.proj.weight); nn.init.zeros_(self.fc2.weight)
+        else:
+            nn.init.normal_(self.proj.weight, std=0.02 / math.sqrt(2 * cfg.layers))
+            nn.init.normal_(self.fc2.weight, std=0.02 / math.sqrt(2 * cfg.layers))
+        self.act = (lambda t: F.relu(t).square()) if cfg.act == "relu2" else F.gelu
+        self.postln = cfg.postln
+        if cfg.postln:  # post-norm needs affine norms; adaLN still modulates the branch inputs
+            self.norm1, self.norm2 = RMSNorm(d), RMSNorm(d)
+        if cfg.geo_init and self.static is not None:
+            with torch.no_grad():
+                self.static.copy_(geometry_bias(h))
 
     def bias(self, x, c, templates):
         B = x.shape[0]
@@ -134,8 +177,28 @@ class Block(nn.Module):
             out = self.static.unsqueeze(0) if out is None else out + self.static
         return out
 
+    def attend(self, h, x, c, templates):
+        B = h.shape[0]
+        qkv = self.qkv(h)
+        coef = (self.dyn(torch.cat([x.mean(1), c], -1)).view(B, self.h, -1) if self.dyn is not None
+                else x.new_zeros(B, self.h, 0, dtype=torch.float32))
+        stat = self.static if self.static is not None else x.new_zeros(self.h, 64, 64, dtype=torch.float32)
+        tm = templates if (templates is not None and self.dyn is not None) else x.new_zeros(0, 4096, dtype=torch.float32)
+        eps = torch.finfo(qkv.dtype).eps
+        return self.proj(attn64qkv(qkv, self.q_norm.weight, self.k_norm.weight, stat, coef, tm, self.h,
+                                   self.dh ** -0.5, eps))
+
     def forward(self, x, c, templates):
         B = x.shape[0]
+        if self.postln:  # x is already normalised; modulate the branch inputs, normalise after each add
+            if self.adaln is not None:
+                s1, b1, g1, s2, b2, g2 = self.adaln(c).unsqueeze(1).chunk(6, -1)
+                h = x * (1 + s1) + b1
+            else:
+                h, g1, g2 = x, 0, 0
+            x = self.norm1(x + self.attend(h, x, c, templates) * (1 + g1))
+            h = x * (1 + s2) + b2 if self.adaln is not None else x
+            return self.norm2(x + self.fc2(self.act(self.fc1(h))) * (1 + g2))
         if self.adaln is not None:
             s1, b1, g1, s2, b2, g2 = self.adaln(c).unsqueeze(1).chunk(6, -1)
             h = self.norm1(x) * (1 + s1) + b1
@@ -152,7 +215,7 @@ class Block(nn.Module):
                                     self.dh ** -0.5, eps))
             x = x + (a * (1 + g1) if self.adaln is not None else a)
             h = self.norm2(x) * (1 + s2) + b2 if self.adaln is not None else self.norm2(x)
-            m = self.fc2(F.relu(self.fc1(h)).square())
+            m = self.fc2(self.act(self.fc1(h)))
             return x + (m * (1 + g2) if self.adaln is not None else m)
         q, k, v = self.qkv(h).view(B, 64, 3, self.h, self.dh).permute(2, 0, 3, 1, 4)
         q, k = self.q_norm(q), self.k_norm(k)
@@ -170,7 +233,7 @@ class Block(nn.Module):
         a = self.proj(a.transpose(1, 2).reshape(B, 64, -1))
         x = x + (a * (1 + g1) if self.adaln is not None else a)
         h = self.norm2(x) * (1 + s2) + b2 if self.adaln is not None else self.norm2(x)
-        m = self.fc2(F.relu(self.fc1(h)).square())
+        m = self.fc2(self.act(self.fc1(h)))
         return x + (m * (1 + g2) if self.adaln is not None else m)
 
 
@@ -187,13 +250,14 @@ class Cloverb(nn.Module):
         self.h_from = nn.Embedding(H, d)       # "a piece left this square j plies ago"
         self.h_to = nn.Embedding(H, d)         # "a piece arrived here j plies ago"
         self.h_piece = nn.Embedding(2 * 6 * 2, d)   # (from/to) x (own/opp) x piece type
-        self.h_cap = nn.Embedding(2, d)        # capture by own/opp
+        self.h_cap = nn.Embedding(2 * 6 if cfg.cap_type else 2, d)   # capture by own/opp (x captured piece)
         for e in (self.piece, self.h_from, self.h_to, self.h_piece, self.h_cap):
             nn.init.normal_(e.weight, std=0.02)
-        self.cond = nn.Sequential(nn.Linear(N_COND, cfg.d_cond), nn.SiLU(), nn.Linear(cfg.d_cond, cfg.d_cond), nn.SiLU())
+        self.cond = nn.Sequential(nn.Linear(N_COND_OPP if cfg.opp_elo else N_COND, cfg.d_cond), nn.SiLU(), nn.Linear(cfg.d_cond, cfg.d_cond), nn.SiLU())
         self.cond_tok = nn.Linear(cfg.d_cond, d)
         self.templates = nn.Parameter(torch.randn(cfg.n_templates, 64 * 64) * 0.1) if cfg.n_templates else None
         self.blocks = nn.ModuleList([Block(cfg) for _ in range(cfg.layers)])
+        self.in_norm = RMSNorm(d) if cfg.postln else None
         self.norm = RMSNorm(d)
         self.p_from = nn.Linear(d, d, bias=False)
         self.p_to = nn.Linear(d, d, bias=False)
@@ -220,17 +284,27 @@ class Cloverb(nn.Module):
         ptype = hist[..., 2].clamp(min=0)
         j = torch.arange(H, device=board.device).expand(B, H)
         vf = self.h_from(j) + self.h_piece(side * 6 + ptype)
-        vt = self.h_to(j) + self.h_piece(12 + side * 6 + ptype) + hist[..., 3].clamp(min=0).unsqueeze(-1) * self.h_cap(side)
+        cap = hist[..., 3].clamp(min=0)
+        if self.cfg.cap_type:
+            capv = (cap > 0).unsqueeze(-1).to(self.h_cap.weight.dtype) * self.h_cap(side * 6 + cap)
+        else:
+            capv = (cap > 0).unsqueeze(-1).to(self.h_cap.weight.dtype) * self.h_cap(side)
+        vt = self.h_to(j) + self.h_piece(12 + side * 6 + ptype) + capv
         vm = valid.unsqueeze(-1).to(vf.dtype)
         idx_f = hist[..., 0].clamp(min=0).unsqueeze(-1).expand(B, H, x.shape[-1])
         idx_t = hist[..., 1].clamp(min=0).unsqueeze(-1).expand(B, H, x.shape[-1])
         x = x.scatter_add(1, idx_f, vf * vm).scatter_add(1, idx_t, vt * vm)
         return x, valid.sum(1)
 
-    def forward(self, board, meta, hist, elo, base, inc, clock):
+    def forward(self, board, meta, hist, elo, base, inc, clock, oelo=None):
         x, hlen = self.embed(board, meta, hist)
-        c = self.cond(cond_features(elo, base, inc, clock, meta, hlen))
+        feats = cond_features(elo, base, inc, clock, meta, hlen)
+        if self.cfg.opp_elo:
+            feats = torch.cat([feats, hat(oelo.float(), ELO_ANCHORS)], -1)
+        c = self.cond(feats)
         x = x + self.cond_tok(c).unsqueeze(1)
+        if self.cfg.postln:
+            x = self.in_norm(x)
         for blk in self.blocks:
             x = blk(x, c, self.templates)
         x = self.norm(x)
