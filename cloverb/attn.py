@@ -28,8 +28,8 @@ def _load():
     lib = ctypes.CDLL(str(LIB))
     vp, i, f = ctypes.c_void_p, ctypes.c_int, ctypes.c_float
     lib.attn64_fwd.argtypes = [vp, vp, vp, vp, vp, vp, i, i, i, i, f, i, vp]
-    lib.attn64_bwd.argtypes = [vp, vp, vp, vp, vp, vp, vp, vp, i, i, i, i, f, i, vp, vp, vp, vp]
-    lib.attn64_fwd.restype = lib.attn64_bwd.restype = i
+    lib.attn64_bwd.argtypes = [vp, vp, vp, vp, vp, vp, vp, vp, i, i, i, i, f, i, vp, vp, vp, vp, vp, vp, vp]
+    lib.attn64_fwd.restype = lib.attn64_bwd.restype = lib.attn64_threads.restype = i
     return lib
 
 
@@ -78,13 +78,14 @@ def attn64_bwd(do: torch.Tensor, q: torch.Tensor, k: torch.Tensor, v: torch.Tens
     T = tmpl.shape[0]
     stat, coef, tmpl = stat.float().contiguous(), coef.float().contiguous(), tmpl.float().contiguous()
     dq, dk, dv = torch.empty_like(q), torch.empty_like(k), torch.empty_like(v)
-    dS = torch.empty(B * H, L * L, dtype=torch.float32)
+    dstat = torch.empty(H, L, L, dtype=torch.float32)
+    dcoef = torch.empty(B, H, T, dtype=torch.float32)
+    dtmpl = torch.empty(T, L * L, dtype=torch.float32)
+    partial = torch.empty(_lib.attn64_threads() * (H + T) * L * L, dtype=torch.float32)
     rc = _lib.attn64_bwd(_ptr(q), _ptr(k), _ptr(v), _ptr(o), _ptr(do), _ptr(stat), _ptr(coef), _ptr(tmpl),
-                         B * H, H, D, T, scale, int(dt == torch.bfloat16), _ptr(dq), _ptr(dk), _ptr(dv), _ptr(dS))
+                         B * H, H, D, T, scale, int(dt == torch.bfloat16), _ptr(dq), _ptr(dk), _ptr(dv),
+                         _ptr(dstat), _ptr(dcoef), _ptr(dtmpl), _ptr(partial))
     assert rc == 0
-    dstat = dS.view(B, H, L, L).sum(0)
-    dcoef = (dS @ tmpl.t()).view(B, H, T) if T else torch.zeros(B, H, 0)
-    dtmpl = coef.view(B * H, T).t() @ dS if T else torch.zeros(0, L * L)
     return dq, dk, dv, dstat, dcoef, dtmpl
 
 

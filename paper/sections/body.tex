@@ -1,0 +1,142 @@
+\section{Introduction}
+Predicting the move a human will play, rather than the best move, underpins human-like engines,
+tutoring and analysis tools. The Maia line of work~\cite{maia1,maia2} and ALLIE~\cite{allie}
+established the task; Chessformer~\cite{chessformer} (released as \textsc{Maia-3}) is the current
+open state of the art at 57.1\% move-matching accuracy with 79M parameters.
+
+We started by reproducing Maia-3: we downloaded all nine released checkpoints, rebuilt the exact
+884,049-position evaluation protocol, and benchmarked every variant (top-1, top-3, cross-entropy).
+The numbers reproduce, but reading the paper next to the released code exposed a series of
+inaccuracies and design decisions that leave accuracy and efficiency on the table
+(Section~\ref{sec:audit}). Three matter most for a human-move model:
+(i) the network never sees the \emph{clock}, and the protocol discards every position played under
+time pressure; (ii) history is eight board snapshots that alternate orientation every ply and are
+fused by a single linear map, which is why ``more history does not help''; (iii) skill is encoded by
+concatenating two 128-d interpolated vectors to every one of the 64 tokens, i.e.\ two scalars
+occupying 73\% of the input.
+
+\textbf{Cloverb} keeps what works in Chessformer (squares as tokens, a from--to policy head) and
+re-designs the rest around the information a human player actually has and around efficiency:
+\begin{itemize}
+\item \textbf{Inputs a player sees.} The player's own Elo (not the opponent's), the time control
+(base seconds and increment), the time left on the player's clock, and the last $\le 64$ plies as
+\emph{moves} scatter-added onto the squares they touched, all in one mover-relative frame; castling
+rights live on the rook squares and the en-passant square is marked.
+\item \textbf{Conditioning where it acts.} Elo and clock features form one vector that modulates
+every block through adaptive normalisation (adaLN-Zero~\cite{dit}) instead of being copied 64 times.
+\item \textbf{A trunk trainable at high learning rate}: pre-norm, QK-norm~\cite{qknorm}, ReLU$^2$
+MLPs~\cite{relu2}, a per-layer static $64\times64$ attention bias per head plus a cheap dynamic
+template mix (``GAB-lite'').
+\item \textbf{Systems.} A C chess core that parses Lichess PGN at $>$0.3M plies/s and builds training
+batches by replaying games on the fly (3.6\,$\mu$s/sample, 6 bytes of storage per ply); a fused
+AVX-512 attention kernel for 64-token sequences; bf16 training on Intel AMX with
+\texttt{torch.compile}; jemalloc. Everything in this paper ran on \emph{one 4-core CPU}.
+\end{itemize}
+
+\section{Background}
+\textbf{Maia}~\cite{maia1} trained one CNN per rating band; \textbf{Maia-2}~\cite{maia2} unified them
+with skill-aware attention over CNN channels; \textbf{ALLIE}~\cite{allie} is a decoder-only
+transformer over move sequences with clock and Elo tokens; \textbf{Chessformer / Maia-3}~\cite{chessformer}
+uses an encoder over 64 square tokens with Geometric Attention Bias (GAB), an attention bias
+generated from a compressed board representation mixing shared templates. \textbf{Allie 2.0}~\cite{allie2},
+a 5.6B-parameter mixture-of-experts trained on 75B tokens with eight GPUs, reports a 0.31-point
+top-1 gain over Maia-3-79M on Maia's protocol and shows that the clock matters most in time trouble.
+
+\section{Reproducing and auditing Maia-3}\label{sec:audit}
+\input{tables/maia3_suite}
+
+\paragraph{Protocol.} The ALLIE test set~\cite{allie} contains 18,239 Lichess blitz games from 2022.
+Dropping each game's first 10 plies and every ply from the first one whose mover has fewer than 30\,s
+selects \emph{exactly} the 884,049 positions reported in the paper. We score a fixed sample of
+100,016 positions (2,101 whole games) of that protocol with the official model code (bf16 trunk,
+fp32 policy head; Table~\ref{tab:maia3}). Our sample is about 0.25 points harder than the full set
+for every variant; all orderings and gaps of the paper's ablations are reproduced.
+
+\paragraph{Findings.} The full list with evidence is in the repository
+(\texttt{docs/critique.md}); the most consequential are:
+\begin{enumerate}
+\item \emph{The released engine runs without history by default.} \texttt{maia3-uci} fills all
+history slots with the current position unless \texttt{--use-uci-history} is passed; this costs
+\input{tables/nohist_cost} points of top-1 accuracy, more than training without history at all.
+\item \emph{History is alternating and input-only.} Each past board is mirrored to its own side to
+move, so consecutive frames are flipped relative to each other, and all frames are fused by one
+linear map. The paper's conclusion that 32 positions are no better than 8 is a property of this
+encoding (we reproduce it: \textsc{hist32} vs.\ 5M), not of chess.
+\item \emph{No clock, and time pressure is removed from training and evaluation.} The unreleased-in-code
+\textsc{Maia3-23M-ponder} checkpoint, which does read the clock, is better even on the
+pressure-free protocol (Table~\ref{tab:maia3}).
+\item \emph{Elo as concatenated soft embeddings} is affine in the rating (the paper concedes it is
+equivalent to a scalar) yet fills 256 of 352 input channels on all 64 tokens.
+\item \emph{Missing state}: castling rights, en passant and the 50-move counter are absent from the
+human models although the paper lists them as necessary.
+\item \emph{Accounting}: ``FLOPs'' are multiply--accumulates (2$\times$ off); parameter counts do not
+match the checkpoints; an undocumented third (``ponder'') head exists and one released checkpoint
+cannot be loaded by the released code; the value head is $d$ wide, not 128; ``all code and data''
+is open-sourced but no training code or data is.
+\item \emph{Missing baseline}: GAB is compared to absolute embeddings and to a translation-invariant
+$15\times15$ relative bias, but not to a static, per-square $64\times64$ bias, so the benefit of GAB
+being \emph{dynamic} is not isolated (the paper's own Table~3 reports 0.77 cross-position correlation
+of GAB maps).
+\item \emph{Evaluation precision}: on CPUs, bf16 policy logits tie often enough that a strict rank
+count inflates top-1 by about one point (55.3\%$\to$56.4\% for Maia-3-5M); we compute all policy heads
+in fp32.
+\end{enumerate}
+
+\section{Cloverb}
+\subsection{Inputs}
+All squares are expressed from the mover's point of view (vertical flip and colour swap when Black
+moves). Token $s$ starts as
+\[
+x_s = E_{\text{piece}}[p_s] + E_{\text{sq}}[s]
+ + \textstyle\sum_{r} \mathbb{1}[\text{right } r]\,\mathbb{1}[s = \text{rook}(r)]\,E_{\text{castle}}[r]
+ + \mathbb{1}[s=\text{ep}]\,E_{\text{ep}}
+ + \sum_{j=1}^{64} \big(\mathbb{1}[s=f_j] F_j + \mathbb{1}[s=t_j] T_j\big),
+\]
+where $(f_j,t_j)$ are the from/to squares of the move played $j$ plies ago and
+$F_j = E_{\text{from}}[j] + E_{\text{pc}}^{\text{from}}[\text{side}_j,\text{piece}_j]$,
+$T_j = E_{\text{to}}[j] + E_{\text{pc}}^{\text{to}}[\text{side}_j,\text{piece}_j] + \mathbb{1}[\text{capture}_j]E_{\text{cap}}[\text{side}_j]$.
+The history term is a scatter-add of 128 vectors per position: it costs $O(64d)$ instead of a
+$(12n{+}256)\times d$ projection per token, it is lossless about the move sequence, and it lets the
+\emph{same} square token accumulate everything that happened on it.
+
+The conditioning vector $c=\mathrm{MLP}(\phi)$ is built from: a hat-function (linear spline)
+encoding of the player's Elo on 15 anchors (400--3200), a hat encoding of $\log(1+\text{time left})$
+on 14 anchors (2\,s--1\,h), $\log$ base, $\log$ increment, time left relative to
+$\text{base}+40\,\text{inc}$, the halfmove and fullmove counters, castling rights, check, and the
+number of available history plies. $c$ is added to every token and drives adaLN-Zero modulation
+(scale, shift and residual gate for attention and MLP) in every block.
+
+\subsection{Trunk and heads}
+Each block is pre-norm: $h=\mathrm{RMSNorm}(x)(1+s_1)+b_1$; attention with RMS-normalised queries
+and keys and bias $B_{\ell h} = S_{\ell h} + \sum_{t=1}^{T} a_{\ell h t}(\bar x, c)\, U_t$, where
+$S_{\ell h}\in\mathbb{R}^{64\times64}$ is a static learned bias per layer and head, $U_t$ are $T$
+templates shared by all layers and $a$ is a linear function of the mean token and $c$
+(GAB-lite; $T{=}8$); the MLP is $W_2\,\mathrm{ReLU}(W_1 h)^2$. Residual branches are gated by
+$(1+g)$ from adaLN and output projections are zero-initialised.
+
+The policy head scores move $(u\!\to\!v)$ as $\langle W_f x_u, W_t x_v\rangle/\sqrt d$ over Maia-3's
+4352-move vocabulary (64$\times$64 plus 256 promotions, whose piece bias comes from the destination
+token), so Maia-3 checkpoints can serve as teachers. Two auxiliary heads read
+$[\bar x, c]$: game outcome (WDL) and think time (32 log-spaced buckets), the latter giving the
+engine a human-like time-management signal. The training loss is
+$\mathcal{L} = \mathrm{CE}_{\text{legal}}(\text{move}) + 0.1\,\mathrm{CE}(\text{WDL}) + 0.05\,\mathrm{CE}(\text{time})$,
+with the softmax restricted to legal moves.
+
+\subsection{Systems}
+\paragraph{Data.} Games are stored whole: per ply a 16-bit move, the 16-bit clock before the move and
+the 16-bit time spent; per game ratings, time control and result. A C core parses Lichess SAN
+movetext with clock comments (validated move-for-move and clock-for-clock against
+\texttt{python-chess}), and builds batches by replaying each sampled game to the sampled ply,
+emitting the board, castling/en-passant state, the 64-ply history and a legal-move bitmask in
+$\approx$3.6\,$\mu$s per sample on one core, in a background thread (ctypes releases the GIL).
+5.5M games (372M plies) occupy 2.2\,GB and any position can be sampled in any epoch.
+
+\paragraph{Compute.} Training uses bf16 autocast on Intel AMX with \texttt{torch.compile}. Profiling
+showed that GEMMs were only a third of a step: attention over $B\cdot H$ tiny $64\times64$ problems
+and memory-bound pointwise kernels dominated. PyTorch's fused CPU attention reached only
+$\approx$26\,GFLOP/s on this shape, so we wrote a fused AVX-512 kernel that keeps each head's
+$64\times64$ scores in L1, fuses the static and template biases, and recomputes scores in the
+backward pass (custom \texttt{torch.library} op, exact to $2\cdot10^{-6}$ against PyTorch in fp32).
+Replacing glibc malloc by jemalloc removed page-fault storms on large tensors (+30\%).
+
+\input{sections/experiments}

@@ -1,0 +1,17 @@
+\begin{table}[t]\centering\small
+\caption{Released Maia-3 checkpoints on 100,016 positions of the ALLIE test set under Maia's protocol
+(first 10 plies and time pressure removed). ``Paper'' is the accuracy reported on the full 884,049 positions.
+95\% binomial half-width $\approx$0.31 points.}\label{tab:maia3}
+\begin{tabular}{lrrrrr}\toprule
+Checkpoint & Params & Paper top-1 & Top-1 & Top-3 & CE (nats)\\\midrule
+Maia-3 79M & 78.9M & 57.1 & 56.82 & 83.51 & 1.302 \\
+Maia-3 23M-ponder (clock) & 23.0M & -- & 56.53 & 83.32 & 1.311 \\
+Maia-3 23M & 22.9M & 56.6 & 56.32 & 83.09 & 1.321 \\
+Maia-3 5M & 5.2M & 55.4 & 55.27 & 82.33 & 1.365 \\
+Maia-3 3M (ablation) & 3.2M & 54.8 & 54.58 & 81.77 & 1.389 \\
+5M, absolute PE & 4.6M & 54.7 & 54.37 & 81.62 & 1.395 \\
+5M, relative bias & 4.6M & 54.6 & 54.47 & 81.52 & 1.396 \\
+5M, no history & 5.2M & 54.0 & 53.79 & 81.34 & 1.410 \\
+5M, 32 positions & 5.3M & 55.4 & 55.15 & 82.26 & 1.369 \\
+5M, UCI default (history off) & 5.2M & -- & 53.04 & 80.80 & 1.437 \\
+\bottomrule\end{tabular}\end{table}

@@ -189,24 +189,32 @@ int attn64_fwd(const void *q, const void *k, const void *v, const float *stat, c
     return 0;
 }
 
+// Backward with in-kernel bias gradients. Per-thread partial sums live in `partial`
+// (omp_get_max_threads() * (H + T) * 4096 floats): dstatic[h] += dS, dtmpl[t] += coef[t] * dS, and
+// dcoef[bh, t] = <dS, tmpl[t]>. dstat / dtmpl are overwritten with the reduced sums.
 int attn64_bwd(const void *q, const void *k, const void *v, const void *o, const void *dout, const float *stat,
                const float *coef, const float *tmpl, int BH, int H, int D, int T, float scale, int bf16,
-               void *dq, void *dk, void *dv, float *dS) {
+               void *dq, void *dk, void *dv, float *dstat, float *dcoef, float *dtmpl, float *partial) {
     if (D % 16 || D > 64) return 1;
+    int nt = omp_get_max_threads();
+    int64_t per = (int64_t)(H + T) * L * L;
 #pragma omp parallel
     {
         Scratch s = scratch_new();
         float Dv[L] __attribute__((aligned(64)));
+        float *my = partial + per * omp_get_thread_num();
+        memset(my, 0, sizeof(float) * per);
 #pragma omp for schedule(static)
         for (int bh = 0; bh < BH; bh++) {
             int64_t off = (int64_t)bh * L * D;
+            const float *cf = coef + (int64_t)bh * T;
             load_mat(s.Q, NULL, q, off, D, bf16);
             load_mat(s.K, s.Kt, k, off, D, bf16);
             load_mat(s.V, s.Vt, v, off, D, bf16);
             load_mat(s.O, NULL, o, off, D, bf16);
             load_mat(s.dO, NULL, dout, off, D, bf16);
             mm_XYt(s.S, s.Q, s.Kt, D, scale);                                         // recompute P
-            bias_softmax(s.S, stat ? stat + (int64_t)(bh % H) * L * L : NULL, coef + (int64_t)bh * T, tmpl, T);
+            bias_softmax(s.S, stat ? stat + (int64_t)(bh % H) * L * L : NULL, cf, tmpl, T);
             for (int i = 0; i < L; i++) {
                 __m512 acc = _mm512_setzero_ps();
                 for (int c = 0; c < D; c += 16)
@@ -214,14 +222,26 @@ int attn64_bwd(const void *q, const void *k, const void *v, const void *o, const
                 Dv[i] = _mm512_reduce_add_ps(acc);
             }
             mm_XYt(s.dP, s.dO, s.Vt, D, 1.0f);                                        // dP = dO V^T
-            float *ds = dS + (int64_t)bh * L * L;
+            float *ms = my + (int64_t)(bh % H) * L * L;
             for (int i = 0; i < L; i++) {                                             // dS = P (dP - D)
                 __m512 dd = _mm512_set1_ps(Dv[i]);
                 for (int c = 0; c < L; c += 16) {
-                    __m512 g = _mm512_mul_ps(_mm512_load_ps(s.S + i * L + c), _mm512_sub_ps(_mm512_load_ps(s.dP + i * L + c), dd));
-                    _mm512_store_ps(s.dP + i * L + c, g);
-                    _mm512_storeu_ps(ds + i * L + c, g);
+                    int x = i * L + c;
+                    __m512 g = _mm512_mul_ps(_mm512_load_ps(s.S + x), _mm512_sub_ps(_mm512_load_ps(s.dP + x), dd));
+                    _mm512_store_ps(s.dP + x, g);
+                    _mm512_storeu_ps(ms + x, _mm512_add_ps(_mm512_loadu_ps(ms + x), g));
                 }
+            }
+            for (int t = 0; t < T; t++) {
+                const float *tp = tmpl + (int64_t)t * L * L;
+                float *mt = my + (int64_t)(H + t) * L * L;
+                __m512 c = _mm512_set1_ps(cf[t]), acc = _mm512_setzero_ps();
+                for (int x = 0; x < L * L; x += 16) {
+                    __m512 g = _mm512_load_ps(s.dP + x);
+                    acc = _mm512_fmadd_ps(g, _mm512_loadu_ps(tp + x), acc);
+                    _mm512_storeu_ps(mt + x, _mm512_fmadd_ps(c, g, _mm512_loadu_ps(mt + x)));
+                }
+                dcoef[(int64_t)bh * T + t] = _mm512_reduce_add_ps(acc);
             }
             mm_AtX(s.dV, s.S, s.dO, D, 1.0f);                                         // dV = P^T dO
             mm_AX(s.dQ, s.dP, s.K, D, scale);                                         // dQ = scale dS K
@@ -236,5 +256,15 @@ int attn64_bwd(const void *q, const void *k, const void *v, const void *o, const
         }
         scratch_free(&s);
     }
+    // reduce per-thread partials (parallel over the output elements)
+    int64_t nH = (int64_t)H * L * L, nT = (int64_t)T * L * L;
+#pragma omp parallel for schedule(static)
+    for (int64_t x = 0; x < nH + nT; x++) {
+        float acc = 0.f;
+        for (int th = 0; th < nt; th++) acc += partial[per * th + x];
+        if (x < nH) dstat[x] = acc; else dtmpl[x - nH] = acc;
+    }
     return 0;
 }
+
+int attn64_threads(void) { return omp_get_max_threads(); }

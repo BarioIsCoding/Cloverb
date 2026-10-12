@@ -1,0 +1,15 @@
+\section{Experiments}
+\paragraph{Data.} Training uses four Lichess parquet shards~\cite{lichess} from August and September
+2025 (after Maia-3's training window, January 2023--July 2025): 5.54M rated games with clocks from
+bullet to classical, 372M plies. A position is drawn by picking a (game, side) pair with weight
+$p(\text{Elo bin})^{-0.3}\times w_{\text{tc}}$ (bullet 0.6, blitz 1, rapid 1.3, classical 4) times
+the number of moves that side played, then a uniform ply of that side; plies before move 10 are
+kept with probability 0.5. Unlike Maia-3 we keep time-pressure positions.
+
+\paragraph{Test sets.} (1) The ALLIE 2022 blitz test set under Maia's protocol (100,016-position
+sample, Table~\ref{tab:maia3}); (2) the same 2,101 games with \emph{all} 141,390 plies, i.e.\ including
+openings and time pressure; (3) fresh games from September 2026 (120k games streamed from the
+official dump, never seen by any model): 25k positions each of bullet, blitz, rapid and classical
+(all plies), and 50k blitz positions under Maia's protocol.
+
+\input{sections/results}
