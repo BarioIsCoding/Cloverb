@@ -87,6 +87,21 @@ def main_table(sets, models):
     (OUT / "main.tex").write_text(tex)
 
 
+def diag_table(rows):
+    """rows: [(label, log path)] -> top-1 / top-3 / CE at 512k positions (EMA)."""
+    out = []
+    for lab, p in rows:
+        c = run_curve(p)
+        e = c.get(512000)
+        out.append(f"{lab} & {100 * e['top1']:.1f} & {100 * e['top3']:.1f} & {e['ce']:.3f} \\\\" if e else f"{lab} & -- & -- & -- \\\\")
+    tex = (r"\begin{table}[t]\centering\small" "\n"
+           r"\caption{Single-factor diagnostics after 512k training positions (EMA weights, ALLIE 10k sample; same data "
+           r"stream for every row). Rows below the rule are applied on top of geometry initialisation.}\label{tab:diag}" "\n"
+           r"\begin{tabular}{lrrr}\toprule" "\n"
+           "Configuration & Top-1 & Top-3 & CE\\\\\\midrule\n" + "\n".join(out) + "\n\\bottomrule\\end{tabular}\\end{table}\n")
+    (OUT / "diag.tex").write_text(tex)
+
+
 if __name__ == "__main__":
     maia3_suite()
     print("tables written to", OUT)

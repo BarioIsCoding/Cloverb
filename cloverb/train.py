@@ -154,7 +154,7 @@ def main():
     gs = concat_stores(a.stores)
     print(f"train store: {gs.n_games} games, {len(gs.moves)} plies", flush=True)
     if a.teacher_cache:
-        sampler = PoolSampler(a.teacher_cache, a.stores, seed=a.seed + step)
+        sampler = PoolSampler(a.teacher_cache, a.stores, seed=a.seed + step, n_games=gs.n_games)
         print(f"teacher pool: {len(sampler.g)} positions", flush=True)
     else:
         sampler = Sampler(gs, SamplerConfig(elo_alpha=a.elo_alpha, seed=a.seed + step))

@@ -14,6 +14,7 @@ Positions are rebuilt by replaying moves, so a store of 1M games is ~200 MB.
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 
 import numpy as np
@@ -59,8 +60,15 @@ class GameStore:
 
     @classmethod
     def load(cls, path: str, mmap: bool = False) -> "GameStore":
+        if os.path.isdir(path):  # directory of .npy files: memory-mapped, shared through the page cache
+            return cls(**{k: np.load(os.path.join(path, k + ".npy"), mmap_mode="r") for k in cls.__dataclass_fields__})
         z = np.load(path, mmap_mode="r" if mmap else None)
         return cls(**{k: z[k] for k in cls.__dataclass_fields__})
+
+    def save_dir(self, path: str):
+        os.makedirs(path, exist_ok=True)
+        for k in self.__dataclass_fields__:
+            np.save(os.path.join(path, k + ".npy"), np.ascontiguousarray(getattr(self, k)))
 
 
 def from_allie_jsonl(path: str) -> GameStore:

@@ -13,6 +13,8 @@ from .gamestore import GameStore
 
 
 def concat_stores(paths: list[str]) -> GameStore:
+    if len(paths) == 1:
+        return GameStore.load(paths[0])
     parts = [GameStore.load(p) for p in paths]
     offs, base = [np.zeros(1, np.int64)], 0
     for g in parts:
@@ -99,10 +101,13 @@ MODEL_KEYS = ("board", "meta", "hist", "elo", "base", "inc", "clock")
 class PoolSampler:
     """Epochs over teacher-labelled pools (tools/label_teacher.py): yields (game, ply, soft target)."""
 
-    def __init__(self, paths: list[str], stores: list[str], seed: int = 0, vocab: int = 4352):
+    def __init__(self, paths: list[str], stores: list[str], seed: int = 0, vocab: int = 4352, n_games: int = -1):
         zs = [np.load(p) for p in paths]
         for z in zs:
-            assert list(z["stores"]) == list(stores), "pool was labelled against a different store list"
+            if list(z["stores"]) != list(stores):  # e.g. the merged copy of the same stores: compare sizes
+                n = sum(len(np.load(s_, mmap_mode="r")["offsets"]) - 1 if not s_.endswith("/") and s_.endswith(".npz")
+                        else len(np.load(s_ + "/offsets.npy", mmap_mode="r")) - 1 for s_ in z["stores"])
+                assert n == n_games, "pool was labelled against a different store"
         self.g = np.concatenate([z["game"] for z in zs]); self.p = np.concatenate([z["ply"] for z in zs])
         self.idx = np.concatenate([z["idx"] for z in zs]).astype(np.int64)
         pr = np.concatenate([z["prob"] for z in zs]).astype(np.float32)
