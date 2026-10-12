@@ -23,6 +23,15 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+try:  # fused AVX-512 attention for 64-token boards (csrc/attn64.c); SDPA fallback elsewhere
+    with open("/proc/cpuinfo") as _f:
+        _HAS_AVX512 = "avx512f" in _f.read()
+    if _HAS_AVX512:
+        from .attn import attn64
+    FUSED_ATTN = _HAS_AVX512
+except Exception:  # pragma: no cover
+    FUSED_ATTN = False
+
 VOCAB = 4352
 ELO_ANCHORS = torch.arange(400.0, 3201.0, 200.0)          # 15 hat functions
 LOGT_ANCHORS = torch.log1p(torch.tensor([2., 5, 10, 20, 30, 45, 60, 90, 120, 180, 300, 600, 1200, 3600]))
@@ -132,10 +141,17 @@ class Block(nn.Module):
             h = self.norm1(x)
         q, k, v = self.qkv(h).view(B, 64, 3, self.h, self.dh).permute(2, 0, 3, 1, 4)
         q, k = self.q_norm(q), self.k_norm(k)
-        bias = self.bias(x, c, templates)
-        if bias is not None:
-            bias = bias.to(q.dtype)
-        a = F.scaled_dot_product_attention(q, k, v, attn_mask=bias)
+        if FUSED_ATTN:
+            coef = (self.dyn(torch.cat([x.mean(1), c], -1)).view(B, self.h, -1) if self.dyn is not None
+                    else x.new_zeros(B, self.h, 0, dtype=torch.float32))
+            stat = self.static if self.static is not None else x.new_zeros(self.h, 64, 64, dtype=torch.float32)
+            tm = templates if (templates is not None and self.dyn is not None) else x.new_zeros(0, 4096, dtype=torch.float32)
+            a = attn64(q, k, v, stat, coef, tm, self.dh ** -0.5)
+        else:
+            bias = self.bias(x, c, templates)
+            if bias is not None:
+                bias = bias.to(q.dtype)
+            a = F.scaled_dot_product_attention(q, k, v, attn_mask=bias)
         a = self.proj(a.transpose(1, 2).reshape(B, 64, -1))
         x = x + (a * (1 + g1) if self.adaln is not None else a)
         h = self.norm2(x) * (1 + s2) + b2 if self.adaln is not None else self.norm2(x)
