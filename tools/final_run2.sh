@@ -8,7 +8,7 @@ S=/home/user/data/store/merged4
 P=/home/user/data/pool; mkdir -p $P
 cd /home/user/cloverb
 . /home/user/venv/bin/activate
-export LD_PRELOAD=/lib/x86_64-linux-gnu/libjemalloc.so.2 MALLOC_CONF="background_thread:true,dirty_decay_ms:5000,muzzy_decay_ms:5000"
+export LD_PRELOAD=/lib/x86_64-linux-gnu/libjemalloc.so.2 MALLOC_CONF="background_thread:true,dirty_decay_ms:-1,muzzy_decay_ms:-1"
 if [ -n "$WAIT_PID" ]; then while kill -0 $WAIT_PID 2>/dev/null; do sleep 30; done; fi
 POOLS=""
 for i in $(seq 0 $((NCH - 1))); do
