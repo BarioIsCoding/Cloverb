@@ -38,6 +38,15 @@ cross-entropy), so the final model drops it and keeps only static, geometry-init
 
 \subsection{Final model}
 \input{tables/main}
+\input{sections/final_text}
+
+\subsection{Inference}
+\input{tables/infer}
+Cloverb ships as a single C file with no Python or PyTorch dependency: the C chess core encodes the
+position and its history, the trunk's GEMMs run on AMX bf16 tiles with weights packed once into VNNI
+tiles, attention runs in AVX-512 with each head's scores kept in registers and L1, and the policy head
+stays in fp32. Against the PyTorch forward pass of the same weights it reproduces move probabilities to
+within $10^{-3}$ and the same top move on every tested position.
 
 \section{Limitations}
 \begin{itemize}
