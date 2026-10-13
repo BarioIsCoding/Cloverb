@@ -33,7 +33,8 @@ def learning(runs, out, refs):
     """runs: list of (label, log.jsonl path); refs: {label: top1} horizontal references (gray)."""
     fig, ax = plt.subplots(figsize=(5.2, 3.2))
     for i, (lab, p) in enumerate(runs):
-        pts = [json.loads(l) for l in open(p) if '"eval_ema"' in l]
+        pts = {d["step"]: d for d in (json.loads(l) for l in open(p) if '"eval_ema"' in l)}  # last per step (resumes)
+        pts = [pts[s] for s in sorted(pts)]
         x = [d["positions_seen"] / 1e6 for d in pts]
         y = [100 * d["eval_ema"]["top1"] for d in pts]
         ax.plot(x, y, color=SLOTS[i], lw=2, marker="o", ms=4, label=lab)

@@ -5,17 +5,20 @@ usage: python tools/eval_cloverb.py --ckpt runs/X/ema.pt --store S.npz --subset 
 """
 import argparse
 import json
+import math
 import sys
 import time
 from pathlib import Path
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from cloverb.data import MODEL_KEYS, make_inputs  # noqa: E402
 from cloverb.gamestore import GameStore  # noqa: E402
 from cloverb.infer import load  # noqa: E402
+from cloverb.model import TIME_BINS, time_bucket  # noqa: E402
 
 
 def main():
@@ -38,10 +41,15 @@ def main():
     idx = np.load(a.subset)
     g = np.searchsorted(gs.offsets, idx, side="right") - 1
     ply = idx - gs.offsets[g]
-    ce = np.zeros(len(idx), np.float32); rank = np.zeros(len(idx), np.int16)
+    n = len(idx)
+    ce = np.zeros(n, np.float32); rank = np.zeros(n, np.int16)
+    # think time: predicted median (s), true time spent (-1 = unknown), bucket CE; value: WDL CE / argmax hit
+    tmed = np.zeros(n, np.float32); tspent = np.zeros(n, np.float32); tce = np.zeros(n, np.float32)
+    tbase = np.zeros(n, np.float32); vce = np.zeros(n, np.float32); vhit = np.zeros(n, bool)
+    centers = torch.expm1(torch.arange(TIME_BINS) * math.log1p(1200) / (TIME_BINS - 1))
     t0 = time.perf_counter()
     with torch.inference_mode():
-        for s in range(0, len(idx), a.batch):
+        for s in range(0, n, a.batch):
             x = make_inputs(gs, g[s:s + a.batch], ply[s:s + a.batch], H)
             if a.no_clock:  # break the clock/position link: shuffle the fraction of base time left
                 frac = (x["clock"] / x["base"].clamp(min=1))[torch.randperm(len(x["clock"]))]
@@ -51,18 +59,37 @@ def main():
             if a.elo_override is not None:
                 x["elo"] = torch.full_like(x["elo"], a.elo_override)
             with torch.autocast("cpu", dtype=torch.bfloat16):
-                lo = model(*(x[k] for k in MODEL_KEYS))[0]
+                lo, v, tt = model(*(x[k] for k in MODEL_KEYS))
             lo = lo.float().masked_fill(~x["legal"], float("-inf"))
             t = x["target"]; tl = lo.gather(1, t[:, None])
-            ce[s:s + a.batch] = (torch.logsumexp(lo, 1) - tl[:, 0]).numpy()
-            rank[s:s + a.batch] = (lo > tl).sum(1).numpy()
+            sl = slice(s, s + a.batch)
+            ce[sl] = (torch.logsumexp(lo, 1) - tl[:, 0]).numpy()
+            rank[sl] = (lo > tl).sum(1).numpy()
+            v = v.float(); vce[sl] = F.cross_entropy(v, x["wdl"], reduction="none").numpy()
+            vhit[sl] = (v.argmax(1) == x["wdl"]).numpy()
+            if tt is not None:
+                tt = tt.float(); cdf = tt.softmax(1).cumsum(1)
+                tmed[sl] = centers[(cdf < 0.5).sum(1).clamp(max=TIME_BINS - 1)].numpy()
+                tce[sl] = F.cross_entropy(tt, time_bucket(x["spent"].clamp(min=0)), reduction="none").numpy()
+            tspent[sl] = x["spent"].numpy()
+            tbase[sl] = (x["clock"] / 40 + x["inc"]).numpy()  # rule-of-thumb baseline: 1/40 of the clock + increment
     dt = time.perf_counter() - t0
     top1, top3 = float(np.mean(rank == 0)), float(np.mean(rank < 3))
-    se = lambda p: 1.96 * np.sqrt(p * (1 - p) / len(idx))
-    info = dict(variant=Path(a.ckpt).parent.name, label=a.label, hist_limit=a.hist_limit, ckpt=a.ckpt, positions=int(len(idx)), top1=top1, top1_ci=se(top1),
-                top3=top3, top3_ci=se(top3), ce=float(ce.mean()), seconds=dt, pos_per_s=len(idx) / dt,
-                store=a.store, subset=a.subset, no_clock=a.no_clock)
-    np.savez(a.out, idx=idx, ce=ce, rank=rank)
+    se = lambda p: 1.96 * np.sqrt(p * (1 - p) / n)  # noqa: E731
+    info = dict(variant=Path(a.ckpt).parent.name, label=a.label, hist_limit=a.hist_limit, ckpt=a.ckpt, positions=int(n), top1=top1, top1_ci=se(top1),
+                top3=top3, top3_ci=se(top3), ce=float(ce.mean()), seconds=dt, pos_per_s=n / dt,
+                store=a.store, subset=a.subset, no_clock=a.no_clock,
+                value_ce=float(vce.mean()), value_acc=float(vhit.mean()))
+    k = tspent >= 0
+    if k.any() and tmed.any():
+        lt, lp, lb = np.log1p(tspent[k]), np.log1p(tmed[k]), np.log1p(tbase[k])
+        info.update(time_positions=int(k.sum()), time_ce=float(tce[k].mean()),
+                    time_mae_log=float(np.abs(lp - lt).mean()),                 # |log(1+pred) - log(1+true)|
+                    time_mae_log_const=float(np.abs(np.median(lt) - lt).mean()),  # best constant (oracle median)
+                    time_mae_log_rule=float(np.abs(lb - lt).mean()),            # clock/40 + increment
+                    time_corr_log=float(np.corrcoef(lp, lt)[0, 1]),
+                    time_within_2x=float(np.mean(np.abs(np.log((tmed[k] + 0.5) / (tspent[k] + 0.5))) <= np.log(2))))
+    np.savez(a.out, idx=idx, ce=ce, rank=rank, tmed=tmed, tspent=tspent)
     Path(a.out).with_suffix(".json").write_text(json.dumps(info, indent=2) + "\n")
     print(json.dumps(info), flush=True)
 

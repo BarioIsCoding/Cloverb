@@ -84,6 +84,31 @@ def ablation_table():
     (TAB / "ablation.tex").write_text(tex)
 
 
+def timing_table():
+    sets = [("allieall", "ALLIE 2022 blitz"), ("fresh_bullet_all", "Fresh bullet"), ("fresh_blitz_all", "Fresh blitz"),
+            ("fresh_rapid_all", "Fresh rapid"), ("fresh_classical_all", "Fresh classical")]
+    rows = []
+    for stem, lab in sets:
+        d = res("cloverb", stem)
+        if d is None or "time_mae_log" not in d:
+            continue
+        rows.append(f"{lab} & {d['time_mae_log']:.3f} & {d['time_mae_log_const']:.3f} & {d['time_mae_log_rule']:.3f} & "
+                    f"{d['time_corr_log']:.2f} & {100 * d['time_within_2x']:.1f} & {100 * d['value_acc']:.1f} & {d['value_ce']:.3f} \\\\")
+    if not rows:
+        return
+    tex = (r"\begin{table*}[t]\centering\small" "\n"
+           r"\caption{Think time and outcome, all plies with a known time spent. Mean absolute error of "
+           r"$\log(1+\text{seconds})$ for Cloverb's median predicted think time, for the best constant (the "
+           r"test set's own median, an oracle) and for the rule of thumb ``1/40 of the clock plus the increment''; "
+           r"correlation of predicted and actual log time; share of moves predicted within a factor of two. "
+           r"Right: accuracy and cross-entropy of the win/draw/loss head against the game result.}\label{tab:timing}" "\n"
+           r"\begin{tabular}{lrrrrrrr}\toprule" "\n"
+           r" & \multicolumn{3}{c}{Log-time MAE} & & & \multicolumn{2}{c}{Outcome}\\" "\n"
+           r"Test set & Cloverb & Constant & Rule & Corr. & $\le2\times$ (\%) & Acc. (\%) & CE\\\midrule" "\n"
+           + "\n".join(rows) + "\n\\bottomrule\\end{tabular}\\end{table*}\n")
+    (TAB / "timing.tex").write_text(tex)
+
+
 def infer_table():
     p = R / "infer_speed.json"
     if not p.exists():
@@ -138,7 +163,7 @@ def summary():
 
 
 if __name__ == "__main__":
-    for f in (main_table, fresh_table, ablation_table, infer_table, summary, figures):
+    for f in (main_table, fresh_table, ablation_table, timing_table, infer_table, summary, figures):
         try:
             f()
         except Exception as e:  # keep going: a missing result should not block the rest

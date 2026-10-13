@@ -145,6 +145,10 @@ and memory-bound pointwise kernels dominated. PyTorch's fused CPU attention reac
 $\approx$26\,GFLOP/s on this shape, so we wrote a fused AVX-512 kernel that keeps each head's
 $64\times64$ scores in L1, fuses the static and template biases, and recomputes scores in the
 backward pass (custom \texttt{torch.library} op, exact to $2\cdot10^{-6}$ against PyTorch in fp32).
-Replacing glibc malloc by jemalloc removed page-fault storms on large tensors (+30\%).
+Replacing glibc malloc by jemalloc removed page-fault storms on large tensors (+30\% with our first
+kernel; once the projection layout and QK normalisation were fused into the kernel, the two allocators
+were within 1\%). jemalloc must then run with a single arena: with per-thread arenas and decay
+disabled, retained memory under the compiled step grew by $\approx$0.3\,GB per minute, and the first
+attempt at the final run was killed for lack of memory after 40 minutes.
 
 \input{sections/experiments}
