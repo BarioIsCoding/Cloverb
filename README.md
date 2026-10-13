@@ -31,6 +31,18 @@ Everything here (data processing, the Maia-3 benchmark, training, evaluation) wa
 
 ## Using the engine
 
+Standalone C engine (no Python or PyTorch; needs AVX-512, uses AMX bf16 tiles when the CPU has them):
+
+```bash
+make cloverb-engine
+./cloverb-engine checkpoints/cloverb.bin           # speaks UCI
+./cloverb-engine checkpoints/cloverb.bin bench 1   # single-position latency
+```
+
+It has the UCI options `Elo`, `BaseTime`, `Temperature`, `MultiPV`, and `Threads`.
+
+Python engine, with the same model plus predicted human think time:
+
 ```bash
 python -m pip install torch numpy          # CPU wheels are enough
 python -m cloverb.uci --model checkpoints/cloverb.pt
@@ -52,7 +64,8 @@ without AVX-512 the model falls back to PyTorch attention.
 | `cloverb/data.py`, `cloverb/train.py` | sampler, threaded batch loader, trainer (bf16/AMX, torch.compile) |
 | `cloverb/teacher.py` | fast Maia-3 re-implementation (same weights) used as a distillation teacher |
 | `cloverb/baseline.py` | Chessformer baseline built from the authors' model code |
-| `cloverb/uci.py`, `cloverb/infer.py` | engine and inference API |
+| `csrc/cloverb_engine.c` | standalone UCI engine (AMX/AVX-512 inference, weights from `tools/export_engine.py`) |
+| `cloverb/uci.py`, `cloverb/infer.py` | Python engine and inference API |
 | `tools/` | store building, Maia-3 benchmark, evaluation, reports, tables |
 
 ## Reproducing
