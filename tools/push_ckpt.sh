@@ -2,6 +2,7 @@
 # Snapshot a training run to the orphan `checkpoints` branch (amended + force-pushed: only the latest
 # snapshot stays reachable, so the repo does not grow). usage: tools/push_ckpt.sh RUN_DIR NAME
 RUN=$1; NAME=$2
+[ -f "$1/last.pt" ] || { echo "no checkpoint in $1"; exit 0; }
 cd /home/user/ckpt || exit 1
 mkdir -p $NAME
 . /home/user/venv/bin/activate

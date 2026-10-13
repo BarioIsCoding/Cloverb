@@ -228,6 +228,8 @@ def main():
             if (time.time() - t0) / 3600 > a.max_hours:
                 break
     pf.close()
+    if step >= a.steps:
+        (out / "done").write_text(str(step))  # lets a supervisor tell completion from a crash
 
 
 if __name__ == "__main__":
