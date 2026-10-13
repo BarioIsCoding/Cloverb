@@ -33,6 +33,7 @@ except Exception:  # pragma: no cover
     FUSED_ATTN = False
 
 FUSED_QKV = True  # norm/permute/transpose fused into the attention kernel (csrc/attn64.c)
+QK_EPS = None     # override the q/k RMSNorm eps (default: finfo of the activation dtype, 2^-7 under bf16)
 
 VOCAB = 4352
 ELO_ANCHORS = torch.arange(400.0, 3201.0, 200.0)          # 15 hat functions
@@ -186,7 +187,7 @@ class Block(nn.Module):
             qkv = self.qkv(h)
             stat = self.static if self.static is not None else x.new_zeros(self.h, 64, 64, dtype=torch.float32)
             tm = templates if (templates is not None and self.dyn is not None) else x.new_zeros(0, 4096, dtype=torch.float32)
-            eps = torch.finfo(qkv.dtype).eps
+            eps = QK_EPS if QK_EPS is not None else torch.finfo(qkv.dtype).eps
             return self.proj(attn64qkv(qkv, self.q_norm.weight, self.k_norm.weight, stat, coef, tm, self.h,
                                        self.dh ** -0.5, eps))
         q, k, v = self.qkv(h).view(B, 64, 3, self.h, self.dh).permute(2, 0, 3, 1, 4)
