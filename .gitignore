@@ -10,3 +10,4 @@ results/maia3/suite2.log
 paper/*.aux
 paper/*.log
 paper/*.out
+/cloverb
