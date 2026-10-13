@@ -36,3 +36,26 @@ Post-norm blocks (as in Chessformer) add a further 0.6 points on top of the geom
 
 \subsection{Final model}
 \input{tables/main}
+
+\section{Limitations}
+\begin{itemize}
+\item \textbf{Compute.} Every number here comes from one 4-core CPU over a few days; Cloverb saw
+tens of millions of positions, Maia-3 half a billion. Our conclusions about architecture are about
+learning speed in this regime; at Maia-3's budget the geometric prior's advantage may shrink.
+\item \textbf{Teacher.} The final model is distilled from a released Maia-3 checkpoint (with the
+human move as a second target), so its accuracy partly inherits Maia-3's; the equal-data
+comparisons in Tables~\ref{tab:arch} and~\ref{tab:diag} use no teacher. Maia-3 never trained on
+positions with less than 30\,s on the clock, so in time trouble the human move carries more weight
+in our loss (0.6 instead of 0.3).
+\item \textbf{Opponent rating.} By design Cloverb sees only the mover's rating, as an engine user
+would set it; Maia-3 also sees the opponent's.
+\item \textbf{Test sets.} The ALLIE test set is blitz from 2022; our training games are from 2025.
+The fresh 2026 test set covers all time controls but has few classical games (615).
+\end{itemize}
+
+\section{Conclusion}
+Reproducing Maia-3 confirmed its accuracy and exposed avoidable losses in its inputs, defaults and
+evaluation. Cloverb reorganises the same square-token idea around what a human sees at the board
+(own rating, clock, the moves that led here) and around the hardware it runs on, and shows that a
+simple geometric prior on attention, not a dynamic bias generator, is what lets such a model learn
+chess quickly.

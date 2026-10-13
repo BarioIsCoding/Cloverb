@@ -178,15 +178,22 @@ class Block(nn.Module):
         return out
 
     def attend(self, h, x, c, templates):
+        """Attention branch output (after the output projection), fused kernel or PyTorch fallback."""
         B = h.shape[0]
-        qkv = self.qkv(h)
         coef = (self.dyn(torch.cat([x.mean(1), c], -1)).view(B, self.h, -1) if self.dyn is not None
                 else x.new_zeros(B, self.h, 0, dtype=torch.float32))
-        stat = self.static if self.static is not None else x.new_zeros(self.h, 64, 64, dtype=torch.float32)
-        tm = templates if (templates is not None and self.dyn is not None) else x.new_zeros(0, 4096, dtype=torch.float32)
-        eps = torch.finfo(qkv.dtype).eps
-        return self.proj(attn64qkv(qkv, self.q_norm.weight, self.k_norm.weight, stat, coef, tm, self.h,
-                                   self.dh ** -0.5, eps))
+        if FUSED_ATTN:
+            qkv = self.qkv(h)
+            stat = self.static if self.static is not None else x.new_zeros(self.h, 64, 64, dtype=torch.float32)
+            tm = templates if (templates is not None and self.dyn is not None) else x.new_zeros(0, 4096, dtype=torch.float32)
+            eps = torch.finfo(qkv.dtype).eps
+            return self.proj(attn64qkv(qkv, self.q_norm.weight, self.k_norm.weight, stat, coef, tm, self.h,
+                                       self.dh ** -0.5, eps))
+        q, k, v = self.qkv(h).view(B, 64, 3, self.h, self.dh).permute(2, 0, 3, 1, 4)
+        q, k = self.q_norm(q), self.k_norm(k)
+        bias = self.bias(x, c, templates)
+        a = F.scaled_dot_product_attention(q, k, v, attn_mask=None if bias is None else bias.to(q.dtype))
+        return self.proj(a.transpose(1, 2).reshape(B, 64, -1))
 
     def forward(self, x, c, templates):
         B = x.shape[0]
