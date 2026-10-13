@@ -1,0 +1,13 @@
+Maia-3 (Chessformer) is the state of the art in predicting human chess moves. We reproduce it
+exactly, benchmark all nine released checkpoints, and audit the paper and code: we find that its
+public engine runs without the move history it was trained with (costing 2.2 points of accuracy),
+that its history encoding and Elo conditioning waste most of the input, that it ignores the clock,
+and that its headline ablation omits the baseline needed to credit its dynamic attention bias.
+We then present \textbf{Cloverb}, a square-token transformer conditioned on exactly what a player
+has at the board: their own rating, the time control, the time left on their clock, and the last
+64 plies encoded as moves. A simple prior, initialising static attention biases with chess movement
+patterns, makes Cloverb learn 5.6 points faster than the Maia-3 architecture at equal data and
+makes Chessformer's dynamic bias generator unnecessary. With a C data pipeline, a fused AVX-512
+attention kernel and bf16 training on Intel AMX, all experiments, including the final model
+distilled from Maia-3 through amortised teacher pools, ran on a single 4-core CPU.
+\input{tables/abstract_results}

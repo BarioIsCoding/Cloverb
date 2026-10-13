@@ -24,9 +24,11 @@ re-designs the rest around the information a human player actually has and aroun
 rights live on the rook squares and the en-passant square is marked.
 \item \textbf{Conditioning where it acts.} Elo and clock features form one vector that modulates
 every block through adaptive normalisation (adaLN-Zero~\cite{dit}) instead of being copied 64 times.
-\item \textbf{A trunk trainable at high learning rate}: pre-norm, QK-norm~\cite{qknorm}, ReLU$^2$
-MLPs~\cite{relu2}, a per-layer static $64\times64$ attention bias per head plus a cheap dynamic
-template mix (``GAB-lite'').
+\item \textbf{Geometry as a prior, not a generator.} Every head of every layer owns a static
+$64\times64$ attention bias, \emph{initialised} with chess movement patterns (rook lines,
+diagonals, knight jumps, king steps, pawn captures). This one change makes Cloverb learn
+5.6 points faster than the Maia-3 architecture at equal data; Chessformer's dynamic bias
+generator turns out to be unnecessary.
 \item \textbf{Systems.} A C chess core that parses Lichess PGN at $>$0.3M plies/s and builds training
 batches by replaying games on the fly (3.6\,$\mu$s/sample, 6 bytes of storage per ply); a fused
 AVX-512 attention kernel for 64-token sequences; bf16 training on Intel AMX with
@@ -88,13 +90,13 @@ All squares are expressed from the mover's point of view (vertical flip and colo
 moves). Token $s$ starts as
 \[
 x_s = E_{\text{piece}}[p_s] + E_{\text{sq}}[s]
- + \textstyle\sum_{r} \mathbb{1}[\text{right } r]\,\mathbb{1}[s = \text{rook}(r)]\,E_{\text{castle}}[r]
- + \mathbb{1}[s=\text{ep}]\,E_{\text{ep}}
- + \sum_{j=1}^{64} \big(\mathbb{1}[s=f_j] F_j + \mathbb{1}[s=t_j] T_j\big),
+ + \textstyle\sum_{r} \mathbf{1}[\text{right } r]\,\mathbf{1}[s = \text{rook}(r)]\,E_{\text{castle}}[r]
+ + \mathbf{1}[s=\text{ep}]\,E_{\text{ep}}
+ + \sum_{j=1}^{64} \big(\mathbf{1}[s=f_j] F_j + \mathbf{1}[s=t_j] T_j\big),
 \]
 where $(f_j,t_j)$ are the from/to squares of the move played $j$ plies ago and
 $F_j = E_{\text{from}}[j] + E_{\text{pc}}^{\text{from}}[\text{side}_j,\text{piece}_j]$,
-$T_j = E_{\text{to}}[j] + E_{\text{pc}}^{\text{to}}[\text{side}_j,\text{piece}_j] + \mathbb{1}[\text{capture}_j]E_{\text{cap}}[\text{side}_j]$.
+$T_j = E_{\text{to}}[j] + E_{\text{pc}}^{\text{to}}[\text{side}_j,\text{piece}_j] + \mathbf{1}[\text{capture}_j]E_{\text{cap}}[\text{side}_j]$.
 The history term is a scatter-add of 128 vectors per position: it costs $O(64d)$ instead of a
 $(12n{+}256)\times d$ projection per token, it is lossless about the move sequence, and it lets the
 \emph{same} square token accumulate everything that happened on it.
@@ -107,12 +109,18 @@ number of available history plies. $c$ is added to every token and drives adaLN-
 (scale, shift and residual gate for attention and MLP) in every block.
 
 \subsection{Trunk and heads}
-Each block is pre-norm: $h=\mathrm{RMSNorm}(x)(1+s_1)+b_1$; attention with RMS-normalised queries
-and keys and bias $B_{\ell h} = S_{\ell h} + \sum_{t=1}^{T} a_{\ell h t}(\bar x, c)\, U_t$, where
-$S_{\ell h}\in\mathbb{R}^{64\times64}$ is a static learned bias per layer and head, $U_t$ are $T$
-templates shared by all layers and $a$ is a linear function of the mean token and $c$
-(GAB-lite; $T{=}8$); the MLP is $W_2\,\mathrm{ReLU}(W_1 h)^2$. Residual branches are gated by
-$(1+g)$ from adaLN and output projections are zero-initialised.
+Each block applies attention with RMS-normalised queries and keys~\cite{qknorm} and an additive
+bias $B_{\ell h} = S_{\ell h} + \sum_{t=1}^{T} a_{\ell h t}(\bar x, c)\, U_t$: $S_{\ell h}\in\mathbb{R}^{64\times64}$
+is a static learned bias per layer and head, and the optional second term mixes $T$ templates shared
+by all layers with coefficients from the mean token and $c$ (a cheap GAB analogue). The static
+biases are initialised with chess geometry: head 1 gets $+2$ on rook lines, head 2 on diagonals,
+head 3 on knight jumps, head 4 on king steps, head 5 on pawn-capture squares, head 6 on the same
+file, head 7 a $-0.5\cdot$Chebyshev-distance locality term, head 8 starts at zero
+(Section~\ref{sec:diag} shows that this prior is what matters and that $T{=}0$ suffices).
+The MLP is $W_2\,\mathrm{ReLU}(W_1 h)^2$~\cite{relu2}. Blocks are post-norm, as in Chessformer:
+$x \leftarrow \mathrm{RMSNorm}(x + (1+g_1)\,\mathrm{Attn}(x(1+s_1)+b_1))$ and likewise for the MLP,
+with $(s,b,g)$ from adaLN-Zero; output projections are zero-initialised. The move history also
+records which piece was captured.
 
 The policy head scores move $(u\!\to\!v)$ as $\langle W_f x_u, W_t x_v\rangle/\sqrt d$ over Maia-3's
 4352-move vocabulary (64$\times$64 plus 256 promotions, whose piece bias comes from the destination
