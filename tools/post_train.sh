@@ -6,9 +6,13 @@ cd /home/user/cloverb
 until [ -f /home/user/runs/final.done ]; do sleep 60; done
 mkdir -p checkpoints
 python - <<'PY'
-import torch
-st = torch.load("/home/user/runs/final/ema.pt", map_location="cpu", weights_only=False)
-torch.save(dict(ema=st["ema"], cfg=st["cfg"], step=st["step"]), "checkpoints/cloverb.pt")
+import json, torch
+st = torch.load("/home/user/runs/final/last.pt", map_location="cpu", weights_only=False)
+ev = [json.loads(l) for l in open("/home/user/runs/final/log.jsonl") if "eval_ema" in l][-1]
+use_raw = ev["eval_raw"]["top1"] > ev["eval_ema"]["top1"] + 0.002
+w = st["model"] if use_raw else st["ema"]
+print("final weights:", "raw" if use_raw else "ema", ev)
+torch.save(dict(ema=w, cfg=st["cfg"], step=st["step"], weights="raw" if use_raw else "ema"), "checkpoints/cloverb.pt")
 PY
 python tools/export_engine.py checkpoints/cloverb.pt checkpoints/cloverb.bin
 cp $RUN/log.jsonl results/runs/final.jsonl; cp $RUN/config.json results/runs/final.config.json
