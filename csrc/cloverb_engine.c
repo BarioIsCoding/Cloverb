@@ -5,7 +5,7 @@
 // (the policy head stays fp32 so near-equal move scores do not tie). Falls back to fp32 AVX-512 GEMMs
 // when AMX is unavailable. Input encoding and legal moves come from cloverb_core.c.
 //
-// Build: gcc -O3 -march=native -o cloverb csrc/cloverb_engine.c -lm
+// Build: gcc -O3 -march=native -fopenmp -o cloverb-engine csrc/cloverb_engine.c -lm
 // Run:   ./cloverb weights.bin            (export with tools/export_engine.py)
 #include "cloverb_core.c"
 
@@ -22,6 +22,10 @@
 #define EPS_QK 0.0078125f  // RMSNorm eps of bf16 q/k during training (torch.finfo(bfloat16).eps)
 
 static int use_amx = 0;
+static int nthreads = 1;
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 // ------------------------------------------------------------------------------------------ weights
 typedef struct { char name[128]; int ndim, dims[4]; float *data; } Tensor;
@@ -96,15 +100,19 @@ static void amx_config(void) {
 }
 
 static uint16_t XB[NT * 4096] __attribute__((aligned(64)));
+static __thread int tiles_ready = 0;
+static inline void ensure_tiles(void) { if (!tiles_ready) { amx_config(); tiles_ready = 1; } }
 
 static void linear(float *y, const float *x, const Lin *L) {
     int N = L->N, K = L->K;
     if (L->vnni) {
         for (int i = 0; i < NT * K; i += 16)
             _mm256_store_si256((__m256i *)(XB + i), (__m256i)_mm512_cvtneps_pbh(_mm512_loadu_ps(x + i)));
-        int KB = K / 32;
-        for (int mb = 0; mb < NT; mb += 32)
-            for (int nb = 0; nb < N / 16; nb += 2) {
+        int KB = K / 32, nblk = (NT / 32) * (N / 32);
+#pragma omp parallel for num_threads(nthreads) schedule(static) if (nthreads > 1)
+        for (int blk = 0; blk < nblk; blk++) {
+                int mb = (blk % (NT / 32)) * 32, nb = (blk / (NT / 32)) * 2;
+                ensure_tiles();
                 _tile_zero(0); _tile_zero(1); _tile_zero(2); _tile_zero(3);
                 for (int kb = 0; kb < KB; kb++) {
                     _tile_loadd(4, XB + (size_t)mb * K + kb * 32, K * 2);
@@ -118,8 +126,9 @@ static void linear(float *y, const float *x, const Lin *L) {
                 _tile_stored(1, y + (size_t)mb * N + nb * 16 + 16, N * 4);
                 _tile_stored(2, y + (size_t)(mb + 16) * N + nb * 16, N * 4);
                 _tile_stored(3, y + (size_t)(mb + 16) * N + nb * 16 + 16, N * 4);
-            }
+        }
     } else {
+#pragma omp parallel for num_threads(nthreads) schedule(static) if (nthreads > 1) collapse(2)
         for (int i = 0; i < NT; i += 4)
             for (int n = 0; n < N; n += 16) {
                 __m512 a0 = _mm512_setzero_ps(), a1 = a0, a2 = a0, a3 = a0;
@@ -239,9 +248,10 @@ static inline __m512 exp512(__m512 x) {
 static void attention(const Layer *y) {
     int dh = D / NH, nv = dh / 16;
     float scale = 1.f / sqrtf((float)dh);
-    static float q[NT * 64] __attribute__((aligned(64))), kt[64 * NT] __attribute__((aligned(64)));
-    static float v[NT * 64] __attribute__((aligned(64))), s[NT * NT] __attribute__((aligned(64)));
+#pragma omp parallel for num_threads(nthreads) schedule(static) if (nthreads > 1)
     for (int h = 0; h < NH; h++) {
+        float q[NT * 64] __attribute__((aligned(64))), kt[64 * NT] __attribute__((aligned(64)));
+        float v[NT * 64] __attribute__((aligned(64))), s[NT * NT] __attribute__((aligned(64)));
         for (int i = 0; i < NT; i++) {
             const float *r = QKV + (size_t)i * 3 * D + h * dh;
             __m512 sq = _mm512_setzero_ps(), sk = sq;
@@ -460,9 +470,10 @@ int main(int argc, char **argv) {
     if (__builtin_cpu_supports("amx-bf16") && syscall(SYS_arch_prctl, 0x1023, 18) == 0) use_amx = 1;
     load_weights(argv[1]);
     build_model();
-    if (use_amx) amx_config();
+    if (use_amx) ensure_tiles();
     srand((unsigned)time(NULL));
     static Cand cands[256];
+    if (argc > 3 && !strcmp(argv[2], "bench")) nthreads = atoi(argv[3]);
     if (argc > 2 && !strcmp(argv[2], "bench")) {  // latency benchmark on a middlegame position
         const char *mvs[] = {"e2e4", "e7e5", "g1f3", "b8c6", "f1b5", "a7a6", "b5a4", "g8f6", "e1g1", "f8e7"};
         uint16_t mv[10]; for (int i = 0; i < 10; i++) parse_move(mvs[i], mv + i);
@@ -470,7 +481,8 @@ int main(int argc, char **argv) {
         for (int i = 0; i < 20; i++) evaluate(NULL, mv, 10, 1500, 180, 2, 150, cands, &ms);
         for (int i = 0; i < n; i++) { evaluate(NULL, mv, 10, 1500, 180, 2, 150, cands, &ms); tot += ms; }
         char s[8]; move_str(cands[0].mv, s);
-        printf("%s: %.3f ms/position (1 thread), top move %s %.3f\n", use_amx ? "AMX bf16" : "AVX-512 fp32", tot / n, s, cands[0].p);
+        printf("%s: %.3f ms/position (%d thread%s), top move %s %.3f\n", use_amx ? "AMX bf16" : "AVX-512 fp32", tot / n,
+               nthreads, nthreads > 1 ? "s" : "", s, cands[0].p);
         return 0;
     }
     if (argc > 2 && !strcmp(argv[2], "dump")) {    // dump raw logits for testing: dump ELO BASE INC CLOCK moves...
@@ -496,7 +508,8 @@ int main(int argc, char **argv) {
             printf("option name Elo type spin default 1500 min 400 max 3200\n");
             printf("option name BaseTime type spin default 0 min 0 max 10800\n");
             printf("option name Temperature type string default 0\n");
-            printf("option name MultiPV type spin default 1 min 1 max 20\nuciok\n");
+            printf("option name MultiPV type spin default 1 min 1 max 20\n");
+            printf("option name Threads type spin default 1 min 1 max 64\nuciok\n");
         } else if (!strcmp(line, "isready")) printf("readyok\n");
         else if (!strcmp(line, "ucinewgame")) { nmoves = 0; fen[0] = 0; game_base = -1; }
         else if (!strncmp(line, "setoption", 9)) {
@@ -507,6 +520,7 @@ int main(int argc, char **argv) {
                 else if (!strcasecmp(nm, "Temperature")) temp = atof(vl);
                 else if (!strcasecmp(nm, "MultiPV")) multipv = atoi(vl);
                 else if (!strcasecmp(nm, "BaseTime")) base_opt = atof(vl);
+                else if (!strcasecmp(nm, "Threads")) nthreads = atoi(vl) < 1 ? 1 : atoi(vl);
             }
         } else if (!strncmp(line, "position", 8)) {
             nmoves = 0; fen[0] = 0;

@@ -6,7 +6,7 @@ all: cloverb-engine cloverb/libcloverb.so cloverb/libattn64.so
 
 # Standalone UCI engine (no Python / PyTorch). Needs AVX-512; uses AMX bf16 tiles when available.
 cloverb-engine: csrc/cloverb_engine.c csrc/cloverb_core.c
-	$(CC) $(CFLAGS) -o $@ csrc/cloverb_engine.c -lm
+	$(CC) $(CFLAGS) -fopenmp -o $@ csrc/cloverb_engine.c -lm
 
 cloverb/libcloverb.so: csrc/cloverb_core.c
 	$(CC) $(CFLAGS) -shared -fPIC -o $@ $<
