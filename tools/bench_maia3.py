@@ -96,6 +96,7 @@ def main():
                     help="none = repeat the current position (the UCI default without --use-uci-history)")
     ap.add_argument("--threads", type=int, default=4)
     ap.add_argument("--time-scale", type=float, default=100.0)
+    ap.add_argument("--fast", action="store_true", help="use cloverb.teacher.FastMaia3 (same weights, compiled)")
     a = ap.parse_args()
     torch.set_num_threads(a.threads)
 
@@ -114,6 +115,11 @@ def main():
     oppo_elo = np.where(white, gs.belo[game_of], gs.welo[game_of]).astype(np.int64)
 
     model, cfg, nparams = load_variant(a.variant)
+    fast = None
+    if a.fast:
+        from cloverb.teacher import CONFIGS, FastMaia3
+        assert a.variant in CONFIGS, f"no fast path for {a.variant}"
+        fast = torch.compile(FastMaia3(a.variant))
     H = cfg.history
     ce = np.zeros(len(idx), np.float32)
     rank = np.zeros(len(idx), np.int16)
@@ -134,8 +140,16 @@ def main():
             x = torch.cat([x, torch.from_numpy(tf)[:, None, :].expand(B, 64, 4)], 2)
         f0 = time.perf_counter()
         with torch.inference_mode():
-            logits = policy_logits(model, x, torch.from_numpy(self_elo[sl]), torch.from_numpy(oppo_elo[sl]),
-                                   bf16=not a.fp32)
+            if fast is not None:
+                tm = None
+                if cfg.include_time_info:
+                    g = game_of[sl]
+                    tm = torch.from_numpy(np.stack([gs.base[g], gs.inc[g], gs.clock[k]], 1).astype(np.float32))
+                with torch.autocast("cpu", dtype=torch.bfloat16, enabled=not a.fp32):
+                    logits = fast(x[:, :, :H * 12], torch.from_numpy(self_elo[sl]), torch.from_numpy(oppo_elo[sl]), tm).float()
+            else:
+                logits = policy_logits(model, x, torch.from_numpy(self_elo[sl]), torch.from_numpy(oppo_elo[sl]),
+                                       bf16=not a.fp32)
         fwd += time.perf_counter() - f0
         lm = torch.zeros(B, logits.shape[1], dtype=torch.bool)
         rows = np.repeat(np.arange(B), loff[k + 1] - loff[k])
