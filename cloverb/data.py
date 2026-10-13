@@ -109,9 +109,8 @@ class PoolSampler:
                         else len(np.load(s_ + "/offsets.npy", mmap_mode="r")) - 1 for s_ in z["stores"])
                 assert n == n_games, "pool was labelled against a different store"
         self.g = np.concatenate([z["game"] for z in zs]); self.p = np.concatenate([z["ply"] for z in zs])
-        self.idx = np.concatenate([z["idx"] for z in zs]).astype(np.int64)
-        pr = np.concatenate([z["prob"] for z in zs]).astype(np.float32)
-        self.prob = pr / pr.sum(1, keepdims=True)
+        self.idx = np.concatenate([z["idx"] for z in zs])      # int16 [N, k], kept compact
+        self.prob = np.concatenate([z["prob"] for z in zs])    # float16 [N, k]; normalised per batch
         self.rng = np.random.default_rng(seed)
         self.order, self.pos, self.vocab, self.epoch = self.rng.permutation(len(self.g)), 0, vocab, 0
 
@@ -121,8 +120,10 @@ class PoolSampler:
             self.epoch += 1
         r = self.order[self.pos:self.pos + B]
         self.pos += B
+        pr = self.prob[r].astype(np.float32)
+        pr /= pr.sum(1, keepdims=True)
         soft = torch.zeros(B, self.vocab)
-        soft.scatter_(1, torch.from_numpy(self.idx[r]), torch.from_numpy(self.prob[r]))
+        soft.scatter_(1, torch.from_numpy(self.idx[r].astype(np.int64)), torch.from_numpy(pr))
         return self.g[r], self.p[r], soft
 
 
