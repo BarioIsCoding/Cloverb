@@ -35,7 +35,8 @@ and the ALLIE authors' independent Maia-3 scorer (`y0mingzhang/allie`, `src/alli
 2. **"FLOPs" are multiply-accumulates.** Table 7 gives 276M "FLOPs" for the 5M model; a forward
    pass of 4.9M parameters over 64 tokens is ~0.6 GFLOP. 276M is the MAC count. The same holds for
    the 427B quoted for AC-270M (20 x 270M x 79 tokens). Comparisons inside the paper are consistent,
-   comparisons with FLOP-counted work are off by 2x.
+   comparisons with FLOP-counted work are off by 2x. Measured with `torch.utils.flop_counter` on the
+   released checkpoints: 5M = 602M FLOPs (paper: 276M), 3M = 348M (164M), absolute-PE = 568M (268M).
 3. **Parameter counts do not match the checkpoints.** Table 7: 4.91M (5M) and 2.98M (3M). The
    released checkpoints contain 5.23M and 3.15M unique parameters (incl. an undocumented head).
 4. **An undocumented third head.** "All models we train have two output heads"; every checkpoint
