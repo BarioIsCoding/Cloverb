@@ -32,7 +32,9 @@ reaches what the zero-initialised model needed three times the data for. It also
 paper's missing baseline: most of what GAB contributes early in training is geometry, which a
 static, per-square bias with the right initialisation supplies at a fraction of the cost.
 Post-norm blocks (as in Chessformer) add a further 0.6 points on top of the geometric prior at
-6\% lower throughput, and we adopt both for the final model.
+6\% lower throughput; encoding \emph{which} piece was captured in the move history adds 0.3 points
+for free; and the dynamic template mix contributes nothing (44.35\% without vs.\ 44.37\% with, equal
+cross-entropy), so the final model drops it and keeps only static, geometry-initialised biases.
 
 \subsection{Final model}
 \input{tables/main}

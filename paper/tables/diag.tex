@@ -1,8 +1,12 @@
 \begin{table}[t]\centering\small
-\caption{Single-factor diagnostics after 512k training positions (EMA weights, ALLIE 10k sample; same data stream for every row). Rows below the rule are applied on top of geometry initialisation.}\label{tab:diag}
+\caption{Single-factor diagnostics after 512k training positions (EMA weights, ALLIE 10k sample; same data stream for every row). Indented rows each change one factor of the geometry-initialised model.}\label{tab:diag}
 \begin{tabular}{lrrr}\toprule
 Configuration & Top-1 & Top-3 & CE\\\midrule
-Chessformer-5M & 38.8 & 63.4 & 2.088 \\
-Cloverb (zero-init biases) & 37.5 & 61.5 & 2.140 \\
-Cloverb + geometry init & 44.4 & 71.1 & 1.823 \\
+Chessformer-5M (authors' module) & 38.8 & 63.4 & 2.088 \\
+Cloverb, zero-initialised biases & 37.5 & 61.5 & 2.140 \\
+\midrule
+Cloverb + geometry initialisation & 44.4 & 71.1 & 1.823 \\
+\quad + post-norm blocks & 45.0 & 72.4 & 1.791 \\
+\quad + captured-piece type in history & 44.7 & 71.5 & 1.818 \\
+\quad without dynamic templates ($T{=}0$) & 44.4 & 71.1 & 1.823 \\
 \bottomrule\end{tabular}\end{table}
