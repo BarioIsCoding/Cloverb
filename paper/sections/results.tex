@@ -37,6 +37,7 @@ for free; and the dynamic template mix contributes nothing (44.35\% without vs.\
 cross-entropy), so the final model drops it and keeps only static, geometry-initialised biases.
 
 \subsection{Final model}
+\input{sections/final_run}
 \input{tables/main}
 \input{tables/fresh}
 \input{tables/ablation}
@@ -60,8 +61,8 @@ learning speed in this regime; at Maia-3's budget the geometric prior's advantag
 \item \textbf{Teacher.} The final model is distilled from a released Maia-3 checkpoint (with the
 human move as a second target), so its accuracy partly inherits Maia-3's; the equal-data
 comparisons in Tables~\ref{tab:arch} and~\ref{tab:diag} use no teacher. Maia-3 never trained on
-positions with less than 30\,s on the clock, so in time trouble the human move carries more weight
-in our loss (0.6 instead of 0.3).
+positions with less than 30\,s on the clock, so in time trouble the human move keeps a weight of 0.6
+in our loss (elsewhere 0.3 for the first 24k steps and 0 afterwards).
 \item \textbf{Opponent rating.} By design Cloverb sees only the mover's rating, as an engine user
 would set it; Maia-3 also sees the opponent's.
 \item \textbf{Test sets.} The ALLIE test set is blitz from 2022; our training games are from 2025.
