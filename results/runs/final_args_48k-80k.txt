@@ -1,0 +1,1 @@
+--d 256 --layers 10 --mlp 3 --heads 8 --templates 0 --geo-init --postln --cap-type --lr 1e-3 --warmup 1000 --decay-frac 0.4 --distill-w 1.0 --distill-w-pressure 0.4 --ema 0.9998 --steps 80000

@@ -14,8 +14,9 @@ the same checkpoint on identical batches. With the human move removed outside ti
 cooled-down model reached a cross-entropy of 1.3970 and 54.36\% top-1, against 1.3996 and 54.19\%
 with the mixed target. Its raw (non-EMA) cross-entropy was already 0.008 lower halfway through the
 cool-down, consistent with less gradient noise. The run continued from step 24k with pure teacher
-targets (still 0.4/0.6 under 30\,s) to 80k steps, with the learning rate decaying linearly to 2\%
-over the last 30\%. In total the model sees about 41M samples, 3.4 passes over the pool.
+targets (still 0.4/0.6 under 30\,s) to 80k steps. By step 48k the constant-rate phase gained only
+0.001 nats per 2k steps, so the linear decay to 2\% of the peak rate was started there, covering the
+last 40\% of training instead of the planned 30\%. In total the model sees about 41M samples, 3.4 passes over the pool.
 
 \paragraph{How far distillation can go.} A student trained to match a teacher approaches the
 teacher's accuracy from below. Table~\ref{tab:teachers} scores every Maia-3 checkpoint and their
