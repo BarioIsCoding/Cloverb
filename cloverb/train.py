@@ -1,6 +1,6 @@
-"""Train Cloverb on Lichess game stores (CPU, bf16 autocast on AMX).
+"""Train Cloverb on Lichess game stores (bf16 autocast: Intel AMX on CPU, tensor cores on CUDA).
 
-usage: python -m cloverb.train --stores S1.npz S2.npz ... --out runs/NAME [--steps N] [...]
+usage: python -m cloverb.train --stores S1.npz S2.npz ... --out runs/NAME [--steps N] [--device cuda] [...]
 """
 from __future__ import annotations
 
@@ -19,6 +19,7 @@ import torch.nn.functional as F
 from .data import MODEL_KEYS, PoolSampler, Prefetcher, Sampler, SamplerConfig, concat_stores, make_inputs
 from .gamestore import GameStore
 from .model import Cloverb, CloverbConfig, count_params, time_bucket
+from .paths import DATA
 
 
 def lr_at(step, a):
@@ -38,6 +39,13 @@ def maia_extra(gs, g, ply):
     return dict(maia_x=x, se=se, oe=oe)
 
 
+def to_dev(x, dev):
+    """Move a batch's tensors to the training device (pinned host memory -> asynchronous copy)."""
+    if dev.type == "cpu":
+        return x
+    return {k: v.to(dev, non_blocking=True) if torch.is_tensor(v) else v for k, v in x.items()}
+
+
 def run_model(model, x, arch):
     if arch == "chessformer":
         lo, v = model(x["maia_x"], x["se"], x["oe"])
@@ -51,6 +59,7 @@ def run_model(model, x, arch):
 @torch.no_grad()
 def evaluate(model, gs: GameStore, idx: np.ndarray, B: int = 1024, H: int = 64, arch: str = "cloverb"):
     model.eval()
+    dev = next(model.parameters()).device
     g = np.searchsorted(gs.offsets, idx, side="right") - 1
     ply = idx - gs.offsets[g]
     ce, rank = [], []
@@ -58,13 +67,14 @@ def evaluate(model, gs: GameStore, idx: np.ndarray, B: int = 1024, H: int = 64, 
         x = make_inputs(gs, g[s:s + B], ply[s:s + B], H)
         if arch == "chessformer":
             x.update(maia_extra(gs, g[s:s + B], ply[s:s + B]))
-        with torch.autocast("cpu", dtype=torch.bfloat16):
+        x = to_dev(x, dev)
+        with torch.autocast(dev.type, dtype=torch.bfloat16):
             lo = run_model(model, x, arch)[0]
         lo = lo.float().masked_fill(~x["legal"], float("-inf"))
         t = x["target"]
         tl = lo.gather(1, t[:, None])
-        ce.append((torch.logsumexp(lo, 1) - tl[:, 0]).numpy())
-        rank.append((lo > tl).sum(1).numpy())
+        ce.append((torch.logsumexp(lo, 1) - tl[:, 0]).cpu().numpy())
+        rank.append((lo > tl).sum(1).cpu().numpy())
     model.train()
     ce, rank = np.concatenate(ce), np.concatenate(rank)
     return dict(top1=float(np.mean(rank == 0)), top3=float(np.mean(rank < 3)), ce=float(ce.mean())), ce, rank
@@ -83,8 +93,8 @@ def main():
     ap.add_argument("--arch", default="cloverb", choices=["cloverb", "chessformer"])
     ap.add_argument("--cf-size", default="5m")
     ap.add_argument("--out", required=True)
-    ap.add_argument("--eval-store", default="/home/user/data/bench/allie2022.npz")
-    ap.add_argument("--eval-idx", default="/home/user/data/bench/allie_sub10k.npy")
+    ap.add_argument("--eval-store", default=f"{DATA}/bench/allie2022.npz")
+    ap.add_argument("--eval-idx", default=f"{DATA}/bench/allie_sub10k.npy")
     ap.add_argument("--d", type=int, default=256)
     ap.add_argument("--layers", type=int, default=8)
     ap.add_argument("--heads", type=int, default=8)
@@ -115,6 +125,10 @@ def main():
     ap.add_argument("--log-every", type=int, default=100)
     ap.add_argument("--compile", action="store_true")
     ap.add_argument("--threads", type=int, default=4)
+    ap.add_argument("--device", default="cpu", help="cpu | cuda (attention falls back to PyTorch SDPA off the CPU)")
+    ap.add_argument("--init", default=None, help="start from these weights (a checkpoint's 'model' or 'ema'), fresh optimizer")
+    ap.add_argument("--init-ema", default=None, help="EMA weights to start from (default: the --init weights)")
+    ap.add_argument("--init-step", type=int, default=None, help="step to continue the LR schedule from (default: the checkpoint's)")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--elo-alpha", type=float, default=0.3)
     ap.add_argument("--max-hours", type=float, default=1e9)
@@ -137,17 +151,34 @@ def main():
         model = Chessformer(a.cf_size)
     else:
         model = Cloverb(cfg)
+    dev = torch.device(a.device)
+    if dev.type == "cuda":
+        torch.backends.cuda.matmul.allow_tf32 = torch.backends.cudnn.allow_tf32 = True
+    model = model.to(dev)
     ema = copy.deepcopy(model).eval()
     for p in ema.parameters():
         p.requires_grad_(False)
-    opt = torch.optim.AdamW(param_groups(model, a.wd), lr=a.lr, betas=(0.9, 0.98), eps=1e-8)
+    opt = torch.optim.AdamW(param_groups(model, a.wd), lr=a.lr, betas=(0.9, 0.98), eps=1e-8,
+                            **(dict(fused=True) if dev.type == "cuda" else {}))
     step = 0
+    rewarm_from = None
     ck = out / "last.pt"
     if ck.exists():
-        st = torch.load(ck, map_location="cpu", weights_only=False)
+        st = torch.load(ck, map_location=dev, weights_only=False)
         model.load_state_dict(st["model"]); ema.load_state_dict(st["ema"]); opt.load_state_dict(st["opt"])
         step = st["step"]
         print(f"resumed at step {step}", flush=True)
+    elif a.init:
+        st = torch.load(a.init, map_location=dev, weights_only=False)
+        model.load_state_dict(st["model"] if "model" in st else st["ema"])
+        if a.init_ema:
+            ste = torch.load(a.init_ema, map_location=dev, weights_only=False)
+            ema.load_state_dict(ste["ema"] if "ema" in ste else ste["model"])
+        else:
+            ema.load_state_dict(model.state_dict())
+        step = a.init_step if a.init_step is not None else st.get("step", 0)
+        rewarm_from = step  # fresh optimiser moments: warm the LR up again from here
+        print(f"initialised from {a.init} at step {step}", flush=True)
     (out / "config.json").write_text(json.dumps(dict(model=cfg.to_dict(), args=vars(a)), indent=2))
     print(f"params {count_params(model) / 1e6:.2f}M", flush=True)
 
@@ -159,11 +190,12 @@ def main():
     else:
         sampler = Sampler(gs, SamplerConfig(elo_alpha=a.elo_alpha, seed=a.seed + step))
     need_maia = a.arch == "chessformer" or a.teacher is not None
-    pf = Prefetcher(gs, sampler, a.batch, a.hist, extra=maia_extra if need_maia else None)
+    pf = Prefetcher(gs, sampler, a.batch, a.hist, extra=maia_extra if need_maia else None, pin=dev.type == "cuda")
     teacher = None
     if a.teacher:
         from .teacher import FastMaia3, teacher_logprobs
-        teacher = torch.compile(FastMaia3(a.teacher)) if a.compile else FastMaia3(a.teacher)
+        teacher = FastMaia3(a.teacher).to(dev)
+        teacher = torch.compile(teacher) if a.compile else teacher
     egs = GameStore.load(a.eval_store)
     eidx = np.load(a.eval_idx)
 
@@ -172,10 +204,11 @@ def main():
     t0 = time.time(); tl = time.time()
     acc_loss = acc_top1 = acc_n = 0.0
     while step < a.steps:
+        lr = lr_at(step, a) * (min(1.0, (step - rewarm_from + 1) / a.warmup) if rewarm_from is not None else 1.0)
         for gparam in opt.param_groups:
-            gparam["lr"] = lr_at(step, a)
-        x = next(pf)
-        with torch.autocast("cpu", dtype=torch.bfloat16):
+            gparam["lr"] = lr
+        x = to_dev(next(pf), dev)
+        with torch.autocast(dev.type, dtype=torch.bfloat16):
             lo, v, t = run_model(fwd, x, a.arch)
         lo = lo.float().masked_fill(~x["legal"], float("-inf"))
         lp = F.cross_entropy(lo, x["target"])
@@ -194,8 +227,9 @@ def main():
         else:
             lpol = lp
         lv = F.cross_entropy(v.float(), x["wdl"])
-        tm = x["spent"] >= 0
-        lt = F.cross_entropy(t.float()[tm], time_bucket(x["spent"][tm])) if t is not None and tm.any() else lo.new_zeros(())
+        tm = (x["spent"] >= 0).float()  # masked mean instead of boolean indexing: no host sync on the GPU
+        lt = ((F.cross_entropy(t.float(), time_bucket(x["spent"].clamp(min=0)), reduction="none") * tm).sum()
+              / tm.sum().clamp(min=1)) if t is not None else lo.new_zeros(())
         loss = lpol + a.value_w * lv + a.time_w * lt
         opt.zero_grad(set_to_none=True)
         loss.backward()
@@ -204,13 +238,12 @@ def main():
         step += 1
         with torch.no_grad():
             dec = min(a.ema, (1 + step) / (10 + step))
-            for pe, pm in zip(ema.parameters(), model.parameters()):
-                pe.lerp_(pm, 1 - dec)
-            acc_loss += lp.item(); acc_top1 += (lo.argmax(1) == x["target"]).float().mean().item(); acc_n += 1
+            torch._foreach_lerp_(list(ema.parameters()), list(model.parameters()), 1 - dec)
+            acc_loss += lp.detach(); acc_top1 += (lo.argmax(1) == x["target"]).float().mean(); acc_n += 1
         if step % a.log_every == 0:
             dt = time.time() - tl; tl = time.time()
-            rec = dict(step=step, loss=acc_loss / acc_n, top1=acc_top1 / acc_n, value=lv.item(), time=lt.item(),
-                       gnorm=float(gn), lr=lr_at(step, a), pos_s=a.log_every * a.batch / dt,
+            rec = dict(step=step, loss=float(acc_loss) / acc_n, top1=float(acc_top1) / acc_n, value=lv.item(), time=lt.item(),
+                       gnorm=float(gn), lr=lr, pos_s=a.log_every * a.batch / dt,
                        hours=(time.time() - t0) / 3600)
             print(json.dumps(rec), flush=True); log.write(json.dumps(rec) + "\n"); log.flush()
             acc_loss = acc_top1 = acc_n = 0.0

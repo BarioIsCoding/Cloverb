@@ -1,0 +1,9 @@
+# CPU: pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cpu
+# NVIDIA GPU: install the CUDA build of torch first (https://pytorch.org/get-started/locally/), then this file
+torch>=2.5
+numpy>=2.0
+pyarrow>=16      # Lichess parquet shards (tools/build_store.py)
+zstandard>=0.22  # streaming .pgn.zst dumps (tools/pgn_stream_store.py)
+python-chess>=1.10  # tests only
+matplotlib>=3.8     # figures only
+huggingface_hub>=0.24  # downloading Maia-3 teacher checkpoints

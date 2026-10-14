@@ -15,7 +15,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-sys.path.insert(0, "/home/user/ext/maia3")
+from .paths import EXT  # noqa: E402
+
+sys.path.insert(0, f"{EXT}/maia3")  # the authors' model code (AGPL-3.0), used only for this baseline
 from maia3.models import MAIA3Model  # noqa: E402
 
 from . import core  # noqa: E402

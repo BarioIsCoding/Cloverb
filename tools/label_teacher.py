@@ -4,7 +4,7 @@ The pool is drawn with the training sampler; for each position we store (game, p
 top-k moves (vocabulary index, probability). Training on the pool for several epochs amortises the
 teacher's cost (see cloverb.train --teacher-cache).
 
-usage: python tools/label_teacher.py --stores S1.npz ... --out pool_000.npz --n 2000000 [--teacher maia3-23m]
+usage: python tools/label_teacher.py --stores S1.npz ... --out pool_000.npz --n 2000000 [--teacher maia3-23m] [--device cuda]
 """
 import argparse
 import sys
@@ -30,18 +30,20 @@ def main():
     ap.add_argument("--batch", type=int, default=512)
     ap.add_argument("--seed", type=int, default=1234)
     ap.add_argument("--elo-alpha", type=float, default=0.3)
+    ap.add_argument("--device", default="cpu")
     a = ap.parse_args()
+    dev = torch.device(a.device)
     torch.set_num_threads(4)
     gs = concat_stores(a.stores)
     sampler = Sampler(gs, SamplerConfig(elo_alpha=a.elo_alpha, seed=a.seed))
-    teacher = torch.compile(FastMaia3(a.teacher))
+    teacher = torch.compile(FastMaia3(a.teacher).to(dev))
     G = np.empty(a.n, np.int64); P = np.empty(a.n, np.int32)
     IDX = np.empty((a.n, a.k), np.int16); PR = np.empty((a.n, a.k), np.float16)
     t0 = time.time()
     def extra(gs_, g, ply):
         xm, se, oe = maia_inputs(gs_, g, ply)
         return dict(maia_x=xm, se=se, oe=oe)
-    pf = Prefetcher(gs, sampler, a.batch, 1, extra=extra)
+    pf = Prefetcher(gs, sampler, a.batch, 1, extra=extra, pin=dev.type == "cuda")
     for s in range(0, a.n, a.batch):
         B = min(a.batch, a.n - s)
         x = next(pf)
@@ -50,8 +52,9 @@ def main():
         for k in ("base", "inc", "clock"):
             x[k] = x[k][:B]
         tm = torch.stack([x["base"], x["inc"], x["clock"]], 1)
-        lp = teacher_logprobs(teacher, xm, se, oe, x["legal"], time=tm)
-        p, i = lp.exp().topk(a.k, dim=1)
+        d = lambda t: t.to(dev, non_blocking=True)  # noqa: E731
+        lp = teacher_logprobs(teacher, d(xm), d(se), d(oe), d(x["legal"]), time=d(tm))
+        p, i = (v.cpu() for v in lp.exp().topk(a.k, dim=1))
         G[s:s + B], P[s:s + B] = g, ply
         IDX[s:s + B] = i.numpy().astype(np.int16)
         PR[s:s + B] = p.numpy().astype(np.float16)

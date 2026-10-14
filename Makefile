@@ -2,7 +2,10 @@
 CC ?= gcc
 CFLAGS ?= -O3 -march=native
 
-all: cloverb-engine cloverb/libcloverb.so cloverb/libattn64.so
+# the fused attention kernel (training on CPU) needs AVX-512; elsewhere PyTorch's SDPA is used
+AVX512 := $(shell grep -qw avx512f /proc/cpuinfo 2>/dev/null && echo 1)
+
+all: cloverb-engine cloverb/libcloverb.so $(if $(AVX512),cloverb/libattn64.so)
 
 # Standalone UCI engine (no Python / PyTorch). -march=native picks AMX bf16, AVX-512, AVX2+FMA or portable C.
 cloverb-engine: csrc/cloverb_engine.c csrc/cloverb_core.c

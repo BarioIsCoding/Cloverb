@@ -130,7 +130,7 @@ class PoolSampler:
 class Prefetcher:
     """Background thread building batches (the C builder releases the GIL)."""
 
-    def __init__(self, gs: GameStore, sampler: Sampler, B: int, H: int, depth: int = 6, extra=None):
+    def __init__(self, gs: GameStore, sampler: Sampler, B: int, H: int, depth: int = 6, extra=None, pin: bool = False):
         self.q: queue.Queue = queue.Queue(depth)
         self.stop = False
 
@@ -145,6 +145,8 @@ class Prefetcher:
                         x["soft"] = smp[2]
                     if extra is not None:
                         x.update(extra(gs, g, ply))
+                    if pin:  # page-locked host memory for asynchronous copies to the GPU
+                        x = {k: v.pin_memory() if torch.is_tensor(v) else v for k, v in x.items()}
                     self.q.put(x)
             except BaseException as e:  # surface loader errors in the training thread
                 self.q.put(e)

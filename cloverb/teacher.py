@@ -4,7 +4,6 @@ but with fused QKV + SDPA attention, a vectorised promotion head and no per-toke
 from __future__ import annotations
 
 import math
-import sys
 from argparse import Namespace
 
 import numpy as np
@@ -12,9 +11,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-sys.path.insert(0, "/home/user/ext/maia3")
+from .paths import MODELS as _MODELS
 
-MODELS = "/home/user/models/maia3"
+MODELS = f"{_MODELS}/maia3"
 CONFIGS = {
     "maia3-5m": ("maia3-5m.pt", dict(d=256, h=8, gen=64, psq=0, inter=64)),
     "maia3-23m": ("maia3-23m.pt", dict(d=512, h=16, gen=128, psq=32, inter=128)),
@@ -101,7 +100,7 @@ class FastMaia3(nn.Module):
             x = F.rms_norm(x + a, (d,), m.n1)
             x = F.rms_norm(x + m.fc2(F.gelu(m.fc1(x))), (d,), m.n2)
         x = F.layer_norm(x, (d,), *self.fn)
-        with torch.autocast("cpu", enabled=False):
+        with torch.autocast(x.device.type, enabled=False):
             x = x.float()
             f, t = x @ self.pf.T, x @ self.pt.T
             base = f @ t.transpose(1, 2) / math.sqrt(d)
@@ -112,7 +111,7 @@ class FastMaia3(nn.Module):
 
 def teacher_logprobs(model, x, se, oe, legal: torch.Tensor, bf16=True, time=None):
     """Legal-masked log-probabilities of a Maia-3 teacher."""
-    with torch.inference_mode(), torch.autocast("cpu", dtype=torch.bfloat16, enabled=bf16):
+    with torch.inference_mode(), torch.autocast(x.device.type, dtype=torch.bfloat16, enabled=bf16):
         lo = model(x, se, oe, time)
     lo = lo.float().masked_fill(~legal, float("-inf"))
     return torch.log_softmax(lo, 1)

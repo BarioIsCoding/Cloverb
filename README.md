@@ -77,3 +77,16 @@ python tools/maia3_prep.py data/bench/allie2022.npz data/bench/allie2022_maia.np
 tools/run_maia3_suite.sh                                                         # Maia-3 benchmark
 tools/launch.sh run.log -m cloverb.train --stores data/store/*.npz --out runs/x --compile
 ```
+
+## Third-party material
+
+* **Lichess games** (training data, fresh test set): Lichess open database, CC0.
+* **ALLIE 2022 test set** (`bench/allie2022.npz`): from the [ALLIE repository](https://github.com/y0mingzhang/allie), MIT.
+* **Maia-3 / Chessformer** (CSSLab, AGPL-3.0, weights published under the same terms): the released
+  Maia-3-23M-ponder checkpoint labels the training positions (its move probabilities are the
+  distillation targets); no Maia-3 weights or code are included here. `cloverb/baseline.py` and
+  `tools/bench_maia3.py` import the authors' code from a separate checkout (`$CLOVERB_EXT/maia3`) to
+  benchmark Maia-3 and train the Chessformer baseline; `cloverb/teacher.py` re-implements the network to
+  run those checkpoints faster. The engine itself (`csrc/`, `cloverb/model.py`, `cloverb/uci.py`,
+  `cloverb/infer.py`) uses none of it.
+* **Training on a GPU:** see [`docs/gpu.md`](docs/gpu.md).

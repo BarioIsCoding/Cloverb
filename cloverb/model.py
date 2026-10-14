@@ -183,7 +183,7 @@ class Block(nn.Module):
         B = h.shape[0]
         coef = (self.dyn(torch.cat([x.mean(1), c], -1)).view(B, self.h, -1) if self.dyn is not None
                 else x.new_zeros(B, self.h, 0, dtype=torch.float32))
-        if FUSED_ATTN:
+        if FUSED_ATTN and h.device.type == "cpu":  # the AVX-512 kernel is CPU-only
             qkv = self.qkv(h)
             stat = self.static if self.static is not None else x.new_zeros(self.h, 64, 64, dtype=torch.float32)
             tm = templates if (templates is not None and self.dyn is not None) else x.new_zeros(0, 4096, dtype=torch.float32)
@@ -212,7 +212,7 @@ class Block(nn.Module):
             h = self.norm1(x) * (1 + s1) + b1
         else:
             h = self.norm1(x)
-        if FUSED_ATTN and FUSED_QKV:
+        if FUSED_ATTN and FUSED_QKV and h.device.type == "cpu":
             qkv = self.qkv(h)
             coef = (self.dyn(torch.cat([x.mean(1), c], -1)).view(B, self.h, -1) if self.dyn is not None
                     else x.new_zeros(B, self.h, 0, dtype=torch.float32))
@@ -227,7 +227,7 @@ class Block(nn.Module):
             return x + (m * (1 + g2) if self.adaln is not None else m)
         q, k, v = self.qkv(h).view(B, 64, 3, self.h, self.dh).permute(2, 0, 3, 1, 4)
         q, k = self.q_norm(q), self.k_norm(k)
-        if FUSED_ATTN:
+        if FUSED_ATTN and q.device.type == "cpu":
             coef = (self.dyn(torch.cat([x.mean(1), c], -1)).view(B, self.h, -1) if self.dyn is not None
                     else x.new_zeros(B, self.h, 0, dtype=torch.float32))
             stat = self.static if self.static is not None else x.new_zeros(self.h, 64, 64, dtype=torch.float32)
@@ -320,7 +320,7 @@ class Cloverb(nn.Module):
 
     def heads(self, x, c):
         if not self.training:  # bf16 logits tie often enough to inflate top-1 (~1 point); use fp32 at eval
-            with torch.autocast("cpu", enabled=False):
+            with torch.autocast(x.device.type, enabled=False):
                 return self._heads(x.float(), c.float())
         return self._heads(x, c)
 
