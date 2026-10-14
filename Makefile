@@ -4,7 +4,7 @@ CFLAGS ?= -O3 -march=native
 
 all: cloverb-engine cloverb/libcloverb.so cloverb/libattn64.so
 
-# Standalone UCI engine (no Python / PyTorch). Needs AVX-512; uses AMX bf16 tiles when available.
+# Standalone UCI engine (no Python / PyTorch). -march=native picks AMX bf16, AVX-512, AVX2+FMA or portable C.
 cloverb-engine: csrc/cloverb_engine.c csrc/cloverb_core.c
 	$(CC) $(CFLAGS) -fopenmp -o $@ csrc/cloverb_engine.c -lm
 

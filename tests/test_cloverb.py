@@ -91,8 +91,13 @@ def test_fused_attention_matches_pytorch(postln):
         assert (a - b).abs().max() <= 1e-4 * (b.abs().max() + 1e-6)
 
 
-@pytest.mark.skipif(not M.FUSED_ATTN, reason="needs AVX-512")
-def test_c_engine_matches_pytorch(tmp_path):
+ENGINE_BUILDS = {"native": ["-march=native"], "avx2": ["-mavx2", "-mfma"], "portable": []}
+
+
+@pytest.mark.parametrize("build", list(ENGINE_BUILDS))
+def test_c_engine_matches_pytorch(tmp_path, build):
+    if build == "avx2" and "avx2" not in open("/proc/cpuinfo").read():
+        pytest.skip("needs AVX2")
     torch.manual_seed(1)
     cfg = CloverbConfig(d=256, layers=2, heads=8, mlp_mult=3, n_templates=0, geo_init=True, postln=True, cap_type=True)
     m = Cloverb(cfg)
@@ -103,7 +108,7 @@ def test_c_engine_matches_pytorch(tmp_path):
     torch.save(dict(ema=m.state_dict(), cfg=cfg.to_dict(), step=0), ck)
     subprocess.check_call([sys.executable, str(ROOT / "tools/export_engine.py"), str(ck), str(tmp_path / "m.bin")])
     exe = tmp_path / "engine"
-    subprocess.check_call(["gcc", "-O3", "-march=native", "-o", str(exe), str(ROOT / "csrc/cloverb_engine.c"), "-lm"])
+    subprocess.check_call(["gcc", "-O3", *ENGINE_BUILDS[build], "-o", str(exe), str(ROOT / "csrc/cloverb_engine.c"), "-lm"])
     M.QK_EPS = 2 ** -7
     try:
         moves = "e2e4 e7e5 g1f3 b8c6 f1b5 a7a6".split()

@@ -31,7 +31,8 @@ Everything here (data processing, the Maia-3 benchmark, training, evaluation) wa
 
 ## Using the engine
 
-Standalone C engine (no Python or PyTorch; needs AVX-512, uses AMX bf16 tiles when the CPU has them):
+Standalone C engine (no Python or PyTorch). It runs on any x86-64 or ARM CPU: `-march=native` selects AMX bf16 tiles
+(Intel Sapphire Rapids and later), AVX-512, AVX2+FMA (e.g. AMD Ryzen) or portable C:
 
 ```bash
 make cloverb-engine

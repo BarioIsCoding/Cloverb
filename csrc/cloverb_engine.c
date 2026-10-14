@@ -1,20 +1,28 @@
 // Cloverb standalone engine: the full network forward pass in C (no PyTorch), behind a UCI loop.
 //
 // Large GEMMs (qkv, attention output, MLP) run on Intel AMX bf16 tiles with weights packed once into
-// VNNI tiles; attention (64x64 per head), norms, conditioning and the policy head run in fp32 AVX-512
-// (the policy head stays fp32 so near-equal move scores do not tie). Falls back to fp32 AVX-512 GEMMs
-// when AMX is unavailable. Input encoding and legal moves come from cloverb_core.c.
+// VNNI tiles when the CPU has them; everything else (and all GEMMs elsewhere) runs in fp32 SIMD:
+// AVX-512, AVX2+FMA (e.g. AMD Zen 2/3, Intel before Ice Lake) or portable C, chosen at compile time
+// by -march=native. The policy head stays fp32 so near-equal move scores do not tie.
+// Input encoding and legal moves come from cloverb_core.c.
 //
 // Build: gcc -O3 -march=native -fopenmp -o cloverb-engine csrc/cloverb_engine.c -lm
-// Run:   ./cloverb weights.bin            (export with tools/export_engine.py)
+// Run:   ./cloverb-engine weights.bin            (export with tools/export_engine.py)
 #include "cloverb_core.c"
 
-#include <immintrin.h>
 #include <math.h>
 #include <stdio.h>
-#include <sys/syscall.h>
 #include <time.h>
+#if defined(__x86_64__) || defined(_M_X64)
+#include <immintrin.h>
+#endif
+#if defined(__AMX_TILE__) && defined(__AMX_BF16__) && defined(__AVX512BF16__) && defined(__linux__)
+#define HAVE_AMX 1
+#include <sys/syscall.h>
 #include <unistd.h>
+#else
+#define HAVE_AMX 0
+#endif
 
 #define NT 64
 #define MAXL 32
@@ -25,6 +33,106 @@ static int use_amx = 0;
 static int nthreads = 1;
 #ifdef _OPENMP
 #include <omp.h>
+#endif
+
+static void *amalloc(size_t n) {  // 64-byte aligned, size rounded up as aligned_alloc requires
+    n = (n + 63) / 64 * 64;
+#ifdef _WIN32
+    return _aligned_malloc(n, 64);
+#else
+    return aligned_alloc(64, n);
+#endif
+}
+
+// ------------------------------------------------------------------------------------------ SIMD
+// V16 = 16 floats: one zmm (AVX-512), two ymm (AVX2+FMA) or a plain array (portable C).
+#if defined(__AVX512F__)
+#define SIMD_NAME "AVX-512"
+typedef __m512 V16;
+static inline V16 vzero(void) { return _mm512_setzero_ps(); }
+static inline V16 vset1(float x) { return _mm512_set1_ps(x); }
+static inline V16 vld(const float *p) { return _mm512_loadu_ps(p); }
+static inline void vst(float *p, V16 v) { _mm512_storeu_ps(p, v); }
+static inline V16 vfma(V16 a, V16 b, V16 c) { return _mm512_fmadd_ps(a, b, c); }
+static inline V16 vadd(V16 a, V16 b) { return _mm512_add_ps(a, b); }
+static inline V16 vsub(V16 a, V16 b) { return _mm512_sub_ps(a, b); }
+static inline V16 vmul(V16 a, V16 b) { return _mm512_mul_ps(a, b); }
+static inline V16 vmax(V16 a, V16 b) { return _mm512_max_ps(a, b); }
+static inline float vsum(V16 v) { return _mm512_reduce_add_ps(v); }
+static inline float vhmax(V16 v) { return _mm512_reduce_max_ps(v); }
+static inline V16 vexp(V16 x) {  // 2^(x log2 e): degree-6 polynomial on the fraction, exact power of two
+    x = _mm512_max_ps(x, _mm512_set1_ps(-87.0f));
+    __m512 t = _mm512_mul_ps(x, _mm512_set1_ps(1.44269504088896341f));
+    __m512 n = _mm512_roundscale_ps(t, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+    __m512 f = _mm512_sub_ps(t, n), p = _mm512_set1_ps(1.5353362e-4f);
+    p = _mm512_fmadd_ps(p, f, _mm512_set1_ps(1.3398874e-3f));
+    p = _mm512_fmadd_ps(p, f, _mm512_set1_ps(9.6181291e-3f));
+    p = _mm512_fmadd_ps(p, f, _mm512_set1_ps(5.5504109e-2f));
+    p = _mm512_fmadd_ps(p, f, _mm512_set1_ps(2.4022651e-1f));
+    p = _mm512_fmadd_ps(p, f, _mm512_set1_ps(6.9314718e-1f));
+    p = _mm512_fmadd_ps(p, f, _mm512_set1_ps(1.0f));
+    return _mm512_scalef_ps(p, n);
+}
+#define ROWS_S 2   // attention rows per register block (scores / P.V)
+#define ROWS_PV 4
+#elif defined(__AVX2__) && defined(__FMA__)
+#define SIMD_NAME "AVX2"
+typedef struct { __m256 a, b; } V16;
+static inline V16 vzero(void) { V16 r = {_mm256_setzero_ps(), _mm256_setzero_ps()}; return r; }
+static inline V16 vset1(float x) { V16 r = {_mm256_set1_ps(x), _mm256_set1_ps(x)}; return r; }
+static inline V16 vld(const float *p) { V16 r = {_mm256_loadu_ps(p), _mm256_loadu_ps(p + 8)}; return r; }
+static inline void vst(float *p, V16 v) { _mm256_storeu_ps(p, v.a); _mm256_storeu_ps(p + 8, v.b); }
+static inline V16 vfma(V16 x, V16 y, V16 z) { V16 r = {_mm256_fmadd_ps(x.a, y.a, z.a), _mm256_fmadd_ps(x.b, y.b, z.b)}; return r; }
+static inline V16 vadd(V16 x, V16 y) { V16 r = {_mm256_add_ps(x.a, y.a), _mm256_add_ps(x.b, y.b)}; return r; }
+static inline V16 vsub(V16 x, V16 y) { V16 r = {_mm256_sub_ps(x.a, y.a), _mm256_sub_ps(x.b, y.b)}; return r; }
+static inline V16 vmul(V16 x, V16 y) { V16 r = {_mm256_mul_ps(x.a, y.a), _mm256_mul_ps(x.b, y.b)}; return r; }
+static inline V16 vmax(V16 x, V16 y) { V16 r = {_mm256_max_ps(x.a, y.a), _mm256_max_ps(x.b, y.b)}; return r; }
+static inline float hsum8(__m256 v) {
+    __m128 s = _mm_add_ps(_mm256_castps256_ps128(v), _mm256_extractf128_ps(v, 1));
+    s = _mm_add_ps(s, _mm_movehl_ps(s, s));
+    return _mm_cvtss_f32(_mm_add_ss(s, _mm_movehdup_ps(s)));
+}
+static inline float vsum(V16 v) { return hsum8(_mm256_add_ps(v.a, v.b)); }
+static inline float vhmax(V16 v) {
+    __m256 m = _mm256_max_ps(v.a, v.b);
+    __m128 s = _mm_max_ps(_mm256_castps256_ps128(m), _mm256_extractf128_ps(m, 1));
+    s = _mm_max_ps(s, _mm_movehl_ps(s, s));
+    return _mm_cvtss_f32(_mm_max_ss(s, _mm_movehdup_ps(s)));
+}
+static inline __m256 exp8(__m256 x) {
+    x = _mm256_max_ps(x, _mm256_set1_ps(-87.0f));
+    __m256 t = _mm256_mul_ps(x, _mm256_set1_ps(1.44269504088896341f));
+    __m256 n = _mm256_round_ps(t, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+    __m256 f = _mm256_sub_ps(t, n), p = _mm256_set1_ps(1.5353362e-4f);
+    p = _mm256_fmadd_ps(p, f, _mm256_set1_ps(1.3398874e-3f));
+    p = _mm256_fmadd_ps(p, f, _mm256_set1_ps(9.6181291e-3f));
+    p = _mm256_fmadd_ps(p, f, _mm256_set1_ps(5.5504109e-2f));
+    p = _mm256_fmadd_ps(p, f, _mm256_set1_ps(2.4022651e-1f));
+    p = _mm256_fmadd_ps(p, f, _mm256_set1_ps(6.9314718e-1f));
+    p = _mm256_fmadd_ps(p, f, _mm256_set1_ps(1.0f));
+    __m256i e = _mm256_slli_epi32(_mm256_add_epi32(_mm256_cvtps_epi32(n), _mm256_set1_epi32(127)), 23);
+    return _mm256_mul_ps(p, _mm256_castsi256_ps(e));  // n >= -126 after the clamp: a normal power of two
+}
+static inline V16 vexp(V16 x) { V16 r = {exp8(x.a), exp8(x.b)}; return r; }
+#define ROWS_S 1
+#define ROWS_PV 2
+#else
+#define SIMD_NAME "portable C"
+typedef struct { float v[16]; } V16;
+static inline V16 vzero(void) { V16 r; for (int i = 0; i < 16; i++) r.v[i] = 0.f; return r; }
+static inline V16 vset1(float x) { V16 r; for (int i = 0; i < 16; i++) r.v[i] = x; return r; }
+static inline V16 vld(const float *p) { V16 r; memcpy(r.v, p, sizeof r.v); return r; }
+static inline void vst(float *p, V16 v) { memcpy(p, v.v, sizeof v.v); }
+static inline V16 vfma(V16 x, V16 y, V16 z) { for (int i = 0; i < 16; i++) z.v[i] += x.v[i] * y.v[i]; return z; }
+static inline V16 vadd(V16 x, V16 y) { for (int i = 0; i < 16; i++) x.v[i] += y.v[i]; return x; }
+static inline V16 vsub(V16 x, V16 y) { for (int i = 0; i < 16; i++) x.v[i] -= y.v[i]; return x; }
+static inline V16 vmul(V16 x, V16 y) { for (int i = 0; i < 16; i++) x.v[i] *= y.v[i]; return x; }
+static inline V16 vmax(V16 x, V16 y) { for (int i = 0; i < 16; i++) x.v[i] = x.v[i] > y.v[i] ? x.v[i] : y.v[i]; return x; }
+static inline float vsum(V16 v) { float s = 0; for (int i = 0; i < 16; i++) s += v.v[i]; return s; }
+static inline float vhmax(V16 v) { float m = v.v[0]; for (int i = 1; i < 16; i++) m = v.v[i] > m ? v.v[i] : m; return m; }
+static inline V16 vexp(V16 x) { for (int i = 0; i < 16; i++) x.v[i] = expf(x.v[i]); return x; }
+#define ROWS_S 1
+#define ROWS_PV 2
 #endif
 
 // ------------------------------------------------------------------------------------------ weights
@@ -52,7 +160,7 @@ static void load_weights(const char *path) {
         T[i].name[nl] = 0;
         if (fread(&T[i].ndim, 4, 1, f) != 1 || fread(T[i].dims, 4, T[i].ndim, f) != (size_t)T[i].ndim) exit(1);
         size_t n = 1; for (int k = 0; k < T[i].ndim; k++) n *= T[i].dims[k];
-        T[i].data = aligned_alloc(64, (n * 4 + 63) / 64 * 64);
+        T[i].data = amalloc(n * 4);
         if (fread(T[i].data, 4, n, f) != n) exit(1);
     }
     fclose(f);
@@ -72,7 +180,7 @@ static Lin make_lin_ex(const float *w, const float *b, int N, int K, int fp32) {
     Lin L = {N, K, NULL, NULL, b};
     if (!fp32 && use_amx && N % 16 == 0 && K % 32 == 0) {
         // tile (nb, kb): 16 rows r (k pairs) x 16 cols n x 2 -> 512 bf16, stored [nb][kb]
-        L.vnni = aligned_alloc(64, (size_t)N * K * 2);
+        L.vnni = amalloc((size_t)N * K * 2);
         int KB = K / 32;
         for (int nb = 0; nb < N / 16; nb++)
             for (int kb = 0; kb < KB; kb++) {
@@ -83,13 +191,14 @@ static Lin make_lin_ex(const float *w, const float *b, int N, int K, int fp32) {
                             t[r * 32 + n * 2 + j] = f2bf(w[(size_t)(nb * 16 + n) * K + kb * 32 + 2 * r + j]);
             }
     } else {
-        L.wt = aligned_alloc(64, (size_t)N * K * 4);            // K x N, for the AVX-512 path
+        L.wt = amalloc((size_t)N * K * 4);                      // K x N, for the fp32 SIMD path
         for (int n = 0; n < N; n++) for (int k = 0; k < K; k++) L.wt[(size_t)k * N + n] = w[(size_t)n * K + k];
     }
     return L;
 }
 static Lin make_lin(const float *w, const float *b, int N, int K) { return make_lin_ex(w, b, N, K, 0); }
 
+#if HAVE_AMX
 typedef struct { uint8_t palette, start_row, res[14]; uint16_t colsb[16]; uint8_t rows[16]; } __attribute__((packed)) TileCfg;
 
 static void amx_config(void) {
@@ -102,9 +211,11 @@ static void amx_config(void) {
 static uint16_t XB[NT * 4096] __attribute__((aligned(64)));
 static __thread int tiles_ready = 0;
 static inline void ensure_tiles(void) { if (!tiles_ready) { amx_config(); tiles_ready = 1; } }
+#endif
 
 static void linear(float *y, const float *x, const Lin *L) {
     int N = L->N, K = L->K;
+#if HAVE_AMX
     if (L->vnni) {
         for (int i = 0; i < NT * K; i += 16)
             _mm256_store_si256((__m256i *)(XB + i), (__m256i)_mm512_cvtneps_pbh(_mm512_loadu_ps(x + i)));
@@ -127,20 +238,22 @@ static void linear(float *y, const float *x, const Lin *L) {
                 _tile_stored(2, y + (size_t)(mb + 16) * N + nb * 16, N * 4);
                 _tile_stored(3, y + (size_t)(mb + 16) * N + nb * 16 + 16, N * 4);
         }
-    } else {
+    } else
+#endif
+    {
 #pragma omp parallel for num_threads(nthreads) schedule(static) if (nthreads > 1) collapse(2)
         for (int i = 0; i < NT; i += 4)
             for (int n = 0; n < N; n += 16) {
-                __m512 a0 = _mm512_setzero_ps(), a1 = a0, a2 = a0, a3 = a0;
+                V16 a0 = vzero(), a1 = a0, a2 = a0, a3 = a0;
                 for (int k = 0; k < K; k++) {
-                    __m512 w = _mm512_loadu_ps(L->wt + (size_t)k * N + n);
-                    a0 = _mm512_fmadd_ps(_mm512_set1_ps(x[(size_t)i * K + k]), w, a0);
-                    a1 = _mm512_fmadd_ps(_mm512_set1_ps(x[(size_t)(i + 1) * K + k]), w, a1);
-                    a2 = _mm512_fmadd_ps(_mm512_set1_ps(x[(size_t)(i + 2) * K + k]), w, a2);
-                    a3 = _mm512_fmadd_ps(_mm512_set1_ps(x[(size_t)(i + 3) * K + k]), w, a3);
+                    V16 w = vld(L->wt + (size_t)k * N + n);
+                    a0 = vfma(vset1(x[(size_t)i * K + k]), w, a0);
+                    a1 = vfma(vset1(x[(size_t)(i + 1) * K + k]), w, a1);
+                    a2 = vfma(vset1(x[(size_t)(i + 2) * K + k]), w, a2);
+                    a3 = vfma(vset1(x[(size_t)(i + 3) * K + k]), w, a3);
                 }
-                _mm512_storeu_ps(y + (size_t)i * N + n, a0); _mm512_storeu_ps(y + (size_t)(i + 1) * N + n, a1);
-                _mm512_storeu_ps(y + (size_t)(i + 2) * N + n, a2); _mm512_storeu_ps(y + (size_t)(i + 3) * N + n, a3);
+                vst(y + (size_t)i * N + n, a0); vst(y + (size_t)(i + 1) * N + n, a1);
+                vst(y + (size_t)(i + 2) * N + n, a2); vst(y + (size_t)(i + 3) * N + n, a3);
             }
     }
     if (L->b)
@@ -150,10 +263,10 @@ static void linear(float *y, const float *x, const Lin *L) {
 // fp32 matrix-vector y[N] = W[N x K] x[K] + b
 static void matvec(float *y, const float *w, const float *b, const float *x, int N, int K) {
     for (int n = 0; n < N; n++) {
-        __m512 acc = _mm512_setzero_ps();
+        V16 acc = vzero();
         int k = 0;
-        for (; k + 16 <= K; k += 16) acc = _mm512_fmadd_ps(_mm512_loadu_ps(w + (size_t)n * K + k), _mm512_loadu_ps(x + k), acc);
-        float s = _mm512_reduce_add_ps(acc);
+        for (; k + 16 <= K; k += 16) acc = vfma(vld(w + (size_t)n * K + k), vld(x + k), acc);
+        float s = vsum(acc);
         for (; k < K; k++) s += w[(size_t)n * K + k] * x[k];
         y[n] = s + (b ? b[n] : 0.f);
     }
@@ -228,22 +341,6 @@ typedef struct { float logits[4352]; float wdl[3]; float tdist[64]; } Output;
 
 static float X[NT * 1024], Hh[NT * 1024], QKV[NT * 3072], O[NT * 1024], A[NT * 1024], MLP[NT * 4096];
 
-static inline __m512 exp512(__m512 x) {
-    const __m512 log2e = _mm512_set1_ps(1.44269504088896341f);
-    x = _mm512_max_ps(x, _mm512_set1_ps(-87.0f));
-    __m512 t = _mm512_mul_ps(x, log2e);
-    __m512 n = _mm512_roundscale_ps(t, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
-    __m512 f = _mm512_sub_ps(t, n);
-    __m512 p = _mm512_set1_ps(1.5353362e-4f);
-    p = _mm512_fmadd_ps(p, f, _mm512_set1_ps(1.3398874e-3f));
-    p = _mm512_fmadd_ps(p, f, _mm512_set1_ps(9.6181291e-3f));
-    p = _mm512_fmadd_ps(p, f, _mm512_set1_ps(5.5504109e-2f));
-    p = _mm512_fmadd_ps(p, f, _mm512_set1_ps(2.4022651e-1f));
-    p = _mm512_fmadd_ps(p, f, _mm512_set1_ps(6.9314718e-1f));
-    p = _mm512_fmadd_ps(p, f, _mm512_set1_ps(1.0f));
-    return _mm512_scalef_ps(p, n);
-}
-
 // attention for one layer: QKV [64 x 3D] -> O [64 x D]; head dim must be a multiple of 16 (<= 64)
 static void attention(const Layer *y) {
     int dh = D / NH, nv = dh / 16;
@@ -254,12 +351,12 @@ static void attention(const Layer *y) {
         float v[NT * 64] __attribute__((aligned(64))), s[NT * NT] __attribute__((aligned(64)));
         for (int i = 0; i < NT; i++) {
             const float *r = QKV + (size_t)i * 3 * D + h * dh;
-            __m512 sq = _mm512_setzero_ps(), sk = sq;
+            V16 sq = vzero(), sk = sq;
             for (int c = 0; c < dh; c += 16) {
-                __m512 a = _mm512_loadu_ps(r + c), b = _mm512_loadu_ps(r + D + c);
-                sq = _mm512_fmadd_ps(a, a, sq); sk = _mm512_fmadd_ps(b, b, sk);
+                V16 a = vld(r + c), b = vld(r + D + c);
+                sq = vfma(a, a, sq); sk = vfma(b, b, sk);
             }
-            float iq = 1.f / sqrtf(_mm512_reduce_add_ps(sq) / dh + EPS_QK), ik = 1.f / sqrtf(_mm512_reduce_add_ps(sk) / dh + EPS_QK);
+            float iq = 1.f / sqrtf(vsum(sq) / dh + EPS_QK), ik = 1.f / sqrtf(vsum(sk) / dh + EPS_QK);
             for (int c = 0; c < dh; c++) {
                 q[i * dh + c] = r[c] * iq * y->qn[c] * scale;
                 kt[c * NT + i] = r[D + c] * ik * y->kn[c];
@@ -267,38 +364,32 @@ static void attention(const Layer *y) {
             }
         }
         const float *st = y->stat + (size_t)h * NT * NT;
-        for (int i = 0; i < NT; i += 2) {                      // scores + softmax, 2 rows at a time
-            __m512 a[2][4];
-            for (int r = 0; r < 2; r++) for (int c = 0; c < 4; c++) a[r][c] = _mm512_loadu_ps(st + (i + r) * NT + 16 * c);
-            for (int c = 0; c < dh; c++) {
-                __m512 q0 = _mm512_set1_ps(q[i * dh + c]), q1 = _mm512_set1_ps(q[(i + 1) * dh + c]);
-                for (int u = 0; u < 4; u++) {
-                    __m512 kk = _mm512_load_ps(kt + c * NT + 16 * u);
-                    a[0][u] = _mm512_fmadd_ps(q0, kk, a[0][u]); a[1][u] = _mm512_fmadd_ps(q1, kk, a[1][u]);
+        for (int i = 0; i < NT; i += ROWS_S) {                 // scores + softmax, ROWS_S rows at a time
+            V16 a[ROWS_S][4];
+            for (int r = 0; r < ROWS_S; r++) for (int c = 0; c < 4; c++) a[r][c] = vld(st + (i + r) * NT + 16 * c);
+            for (int c = 0; c < dh; c++)
+                for (int r = 0; r < ROWS_S; r++) {
+                    V16 qq = vset1(q[(i + r) * dh + c]);
+                    for (int u = 0; u < 4; u++) a[r][u] = vfma(qq, vld(kt + c * NT + 16 * u), a[r][u]);
                 }
-            }
-            for (int r = 0; r < 2; r++) {
-                __m512 m = _mm512_set1_ps(_mm512_reduce_max_ps(_mm512_max_ps(_mm512_max_ps(a[r][0], a[r][1]), _mm512_max_ps(a[r][2], a[r][3]))));
-                __m512 sum = _mm512_setzero_ps();
-                for (int u = 0; u < 4; u++) { a[r][u] = exp512(_mm512_sub_ps(a[r][u], m)); sum = _mm512_add_ps(sum, a[r][u]); }
-                __m512 inv = _mm512_set1_ps(1.f / _mm512_reduce_add_ps(sum));
-                for (int u = 0; u < 4; u++) _mm512_store_ps(s + (i + r) * NT + 16 * u, _mm512_mul_ps(a[r][u], inv));
+            for (int r = 0; r < ROWS_S; r++) {
+                V16 m = vset1(vhmax(vmax(vmax(a[r][0], a[r][1]), vmax(a[r][2], a[r][3]))));
+                V16 sum = vzero();
+                for (int u = 0; u < 4; u++) { a[r][u] = vexp(vsub(a[r][u], m)); sum = vadd(sum, a[r][u]); }
+                V16 inv = vset1(1.f / vsum(sum));
+                for (int u = 0; u < 4; u++) vst(s + (i + r) * NT + 16 * u, vmul(a[r][u], inv));
             }
         }
-        for (int i = 0; i < NT; i += 4) {                      // O = P V, 4 rows at a time
-            __m512 acc[4][4];
-            for (int r = 0; r < 4; r++) for (int c = 0; c < nv; c++) acc[r][c] = _mm512_setzero_ps();
-            for (int j = 0; j < NT; j++) {
-                __m512 p0 = _mm512_set1_ps(s[i * NT + j]), p1 = _mm512_set1_ps(s[(i + 1) * NT + j]);
-                __m512 p2 = _mm512_set1_ps(s[(i + 2) * NT + j]), p3 = _mm512_set1_ps(s[(i + 3) * NT + j]);
-                for (int c = 0; c < nv; c++) {
-                    __m512 vv = _mm512_load_ps(v + j * dh + 16 * c);
-                    acc[0][c] = _mm512_fmadd_ps(p0, vv, acc[0][c]); acc[1][c] = _mm512_fmadd_ps(p1, vv, acc[1][c]);
-                    acc[2][c] = _mm512_fmadd_ps(p2, vv, acc[2][c]); acc[3][c] = _mm512_fmadd_ps(p3, vv, acc[3][c]);
+        for (int i = 0; i < NT; i += ROWS_PV) {                // O = P V, ROWS_PV rows at a time
+            V16 acc[ROWS_PV][4];
+            for (int r = 0; r < ROWS_PV; r++) for (int c = 0; c < nv; c++) acc[r][c] = vzero();
+            for (int j = 0; j < NT; j++)
+                for (int r = 0; r < ROWS_PV; r++) {
+                    V16 p = vset1(s[(i + r) * NT + j]);
+                    for (int c = 0; c < nv; c++) acc[r][c] = vfma(p, vld(v + j * dh + 16 * c), acc[r][c]);
                 }
-            }
-            for (int r = 0; r < 4; r++)
-                for (int c = 0; c < nv; c++) _mm512_storeu_ps(O + (size_t)(i + r) * D + h * dh + 16 * c, acc[r][c]);
+            for (int r = 0; r < ROWS_PV; r++)
+                for (int c = 0; c < nv; c++) vst(O + (size_t)(i + r) * D + h * dh + 16 * c, acc[r][c]);
         }
     }
 }
@@ -306,16 +397,14 @@ static void attention(const Layer *y) {
 static void modulate(float *out, const float *x, const float *sc, const float *sh) {
     for (int i = 0; i < NT; i++)
         for (int c = 0; c < D; c += 16) {
-            __m512 v = _mm512_loadu_ps(x + i * D + c);
-            _mm512_storeu_ps(out + i * D + c, _mm512_fmadd_ps(v, _mm512_add_ps(_mm512_set1_ps(1.f), _mm512_loadu_ps(sc + c)), _mm512_loadu_ps(sh + c)));
+            vst(out + i * D + c, vfma(vld(x + i * D + c), vadd(vset1(1.f), vld(sc + c)), vld(sh + c)));
         }
 }
 
 static void gated_add(float *x, const float *a, const float *g) {
     for (int i = 0; i < NT; i++)
         for (int c = 0; c < D; c += 16) {
-            __m512 gg = _mm512_add_ps(_mm512_set1_ps(1.f), _mm512_loadu_ps(g + c));
-            _mm512_storeu_ps(x + i * D + c, _mm512_fmadd_ps(_mm512_loadu_ps(a + i * D + c), gg, _mm512_loadu_ps(x + i * D + c)));
+            vst(x + i * D + c, vfma(vld(a + i * D + c), vadd(vset1(1.f), vld(g + c)), vld(x + i * D + c)));
         }
 }
 
@@ -394,9 +483,9 @@ static void forward(const int8_t *board, const int16_t *meta, const int8_t *hist
     float isq = 1.f / sqrtf((float)D);
     for (int i = 0; i < NT; i++)
         for (int j = 0; j < NT; j++) {
-            __m512 acc = _mm512_setzero_ps();
-            for (int c = 0; c < D; c += 16) acc = _mm512_fmadd_ps(_mm512_loadu_ps(FF + i * D + c), _mm512_loadu_ps(TT + j * D + c), acc);
-            out->logits[i * 64 + j] = _mm512_reduce_add_ps(acc) * isq;
+            V16 acc = vzero();
+            for (int c = 0; c < D; c += 16) acc = vfma(vld(FF + i * D + c), vld(TT + j * D + c), acc);
+            out->logits[i * 64 + j] = vsum(acc) * isq;
         }
     for (int tf = 0; tf < 8; tf++) {
         float pr[4]; matvec(pr, PP, NULL, TT + (56 + tf) * D, 4, D);
@@ -466,11 +555,15 @@ static float urand(void) { return (rand() + 0.5f) / ((float)RAND_MAX + 1.f); }
 
 int main(int argc, char **argv) {
     if (argc < 2) { fprintf(stderr, "usage: %s weights.bin [bench | dump FEN|startpos moves...]\n", argv[0]); return 1; }
+#if HAVE_AMX
     // AMX needs permission for the tile data state (Linux >= 5.16)
     if (__builtin_cpu_supports("amx-bf16") && syscall(SYS_arch_prctl, 0x1023, 18) == 0) use_amx = 1;
+#endif
     load_weights(argv[1]);
     build_model();
+#if HAVE_AMX
     if (use_amx) ensure_tiles();
+#endif
     srand((unsigned)time(NULL));
     static Cand cands[256];
     if (argc > 3 && !strcmp(argv[2], "bench")) nthreads = atoi(argv[3]);
@@ -481,7 +574,7 @@ int main(int argc, char **argv) {
         for (int i = 0; i < 20; i++) evaluate(NULL, mv, 10, 1500, 180, 2, 150, cands, &ms);
         for (int i = 0; i < n; i++) { evaluate(NULL, mv, 10, 1500, 180, 2, 150, cands, &ms); tot += ms; }
         char s[8]; move_str(cands[0].mv, s);
-        printf("%s: %.3f ms/position (%d thread%s), top move %s %.3f\n", use_amx ? "AMX bf16" : "AVX-512 fp32", tot / n,
+        printf("%s: %.3f ms/position (%d thread%s), top move %s %.3f\n", use_amx ? "AMX bf16" : SIMD_NAME " fp32", tot / n,
                nthreads, nthreads > 1 ? "s" : "", s, cands[0].p);
         return 0;
     }
