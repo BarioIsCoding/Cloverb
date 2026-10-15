@@ -136,8 +136,13 @@ def infer_table():
                 rows.append(f"Cloverb C engine$^*$ & {m.group(1)} & 1 & {m.group(3)} & {ms:.2f} & {1000 / ms:.0f} \\\\")
     if not rows:
         return
+    cpu = "the same 4-core CPU"
+    p = R / "infer_cpu.json"
+    if p.exists():
+        c = json.loads(p.read_text())
+        cpu = f"a {c['cores']}-core Intel Xeon " + ("with AMX" if c["amx"] else "without AMX (AVX-512, no bf16 units)")
     tex = (r"\begin{table}[t]\centering\small" "\n"
-           r"\caption{Inference on the same 4-core CPU (PyTorch rows: model forward only; latency = batch 1, 1 thread). "
+           r"\caption{Inference on " + cpu + r" (PyTorch rows: model forward only; latency = batch 1, 1 thread). "
            r"$^*$Standalone C engine, including input encoding and the softmax over legal moves.}\label{tab:infer}" "\n"
            r"\begin{tabular}{llrrrr}\toprule" "\n" r"Model & Precision & Batch & Threads & ms & pos/s\\\midrule" "\n"
            + "\n".join(rows) + "\n\\bottomrule\\end{tabular}\\end{table}\n")

@@ -64,6 +64,10 @@ def main():
                 res[key] = dict(ms=dt * 1000, pos_per_s=B / dt)
                 print(f"{key:55s} {dt * 1000:8.2f} ms  {B / dt:9.0f} pos/s", flush=True)
     Path(a.out).write_text(json.dumps(res, indent=2) + "\n")
+    cpu = Path("/proc/cpuinfo").read_text()
+    name = next((l.split(":", 1)[1].strip() for l in cpu.splitlines() if l.startswith("model name")), "unknown CPU")
+    Path(a.out).with_name("infer_cpu.json").write_text(json.dumps(dict(
+        model=name, cores=cpu.count("processor\t:"), amx="amx_bf16" in cpu, avx512="avx512f" in cpu)) + "\n")
 
 
 if __name__ == "__main__":

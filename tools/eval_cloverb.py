@@ -33,8 +33,14 @@ def main():
     ap.add_argument("--elo-override", type=float, default=None)
     ap.add_argument("--hist-limit", type=int, default=None, help="hide plies older than this (ablation)")
     ap.add_argument("--label", default=None)
+    ap.add_argument("--precision", default="auto", choices=["auto", "bf16", "fp32"],
+                    help="trunk precision; auto = bf16 only on CPUs with AMX (elsewhere bf16 GEMMs are emulated)")
     a = ap.parse_args()
     torch.set_num_threads(a.threads)
+    bf16 = a.precision == "bf16" or (a.precision == "auto" and "amx_bf16" in Path("/proc/cpuinfo").read_text())
+    if not bf16:  # same function as under bf16 autocast: keep the q/k RMSNorm eps of bf16 training
+        import cloverb.model as cm
+        cm.QK_EPS = torch.finfo(torch.bfloat16).eps
     model = load(a.ckpt)
     H = model.cfg.hist
     gs = GameStore.load(a.store)
@@ -58,7 +64,7 @@ def main():
                 x["hist"][:, a.hist_limit:] = -1
             if a.elo_override is not None:
                 x["elo"] = torch.full_like(x["elo"], a.elo_override)
-            with torch.autocast("cpu", dtype=torch.bfloat16):
+            with torch.autocast("cpu", dtype=torch.bfloat16, enabled=bf16):
                 lo, v, tt = model(*(x[k] for k in MODEL_KEYS))
             lo = lo.float().masked_fill(~x["legal"], float("-inf"))
             t = x["target"]; tl = lo.gather(1, t[:, None])
@@ -79,7 +85,7 @@ def main():
     info = dict(variant=Path(a.ckpt).parent.name, label=a.label, hist_limit=a.hist_limit, ckpt=a.ckpt, positions=int(n), top1=top1, top1_ci=se(top1),
                 top3=top3, top3_ci=se(top3), ce=float(ce.mean()), seconds=dt, pos_per_s=n / dt,
                 store=a.store, subset=a.subset, no_clock=a.no_clock,
-                value_ce=float(vce.mean()), value_acc=float(vhit.mean()))
+                value_ce=float(vce.mean()), value_acc=float(vhit.mean()), precision="bf16" if bf16 else "fp32")
     k = tspent >= 0
     if k.any() and tmed.any():
         lt, lp, lb = np.log1p(tspent[k]), np.log1p(tmed[k]), np.log1p(tbase[k])

@@ -3,8 +3,9 @@
 cd /home/user/cloverb
 . /home/user/venv/bin/activate
 B=/home/user/data/bench; O=results/maia3
+PREC=$(grep -qw amx_bf16 /proc/cpuinfo || echo --fp32)  # bf16 only where the CPU has AMX
 run() { # variant store prep subset out
-  [ -f $O/$5.json ] || python tools/bench_maia3.py --variant $1 --store $2 --prep $3 --subset $4 --out $O/$5.npz --fast | tail -1
+  [ -f $O/$5.json ] || python tools/bench_maia3.py --variant $1 --store $2 --prep $3 --subset $4 --out $O/$5.npz --fast $PREC | tail -1
 }
 for v in maia3-5m maia3-23m-ponder maia3-23m maia3-79m; do
   run $v $B/allie2022.npz $B/allie2022_maia.npz $B/allie_sub_allplies.npy allieall_$v
