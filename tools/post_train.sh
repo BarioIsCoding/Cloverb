@@ -9,7 +9,7 @@ python - <<'PY'
 import json, torch
 st = torch.load("/home/user/runs/final/last.pt", map_location="cpu", weights_only=False)
 ev = [json.loads(l) for l in open("/home/user/runs/final/log.jsonl") if "eval_ema" in l][-1]
-use_raw = ev["eval_raw"]["top1"] > ev["eval_ema"]["top1"] + 0.002
+use_raw = ev["eval_raw"]["ce"] < ev["eval_ema"]["ce"]  # cross-entropy: far less noisy than top-1 on 10k positions
 w = st["model"] if use_raw else st["ema"]
 print("final weights:", "raw" if use_raw else "ema", ev)
 torch.save(dict(ema=w, cfg=st["cfg"], step=st["step"], weights="raw" if use_raw else "ema"), "checkpoints/cloverb.pt")
