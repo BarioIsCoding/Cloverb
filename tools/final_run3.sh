@@ -16,8 +16,10 @@ MARGS=$(cat $ARGS_FILE)
 n=0; tries=0
 while [ ! -f $OUT/done ] && [ $tries -lt 30 ]; do
   tries=$((tries + 1))
-  echo "$(date +%F_%T) start $tries: $MARGS" >> /home/user/runs/$RUN.log
-  python -u -m cloverb.train --stores $S --teacher-cache $POOLS --out $OUT $MARGS \
+  # bf16 autocast only where the CPU has bf16 matrix units (AMX); elsewhere bf16 GEMMs are emulated (~10x slower)
+  PREC=$(grep -qw amx_bf16 /proc/cpuinfo || echo --fp32)
+  echo "$(date +%F_%T) start $tries: $MARGS $PREC" >> /home/user/runs/$RUN.log
+  python -u -m cloverb.train --stores $S --teacher-cache $POOLS --out $OUT $MARGS $PREC \
      --compile --eval-every 2000 --ckpt-every 250 --log-every 100 >> /home/user/runs/$RUN.log 2>&1 &
   TP=$!
   while kill -0 $TP 2>/dev/null; do

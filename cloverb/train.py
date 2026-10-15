@@ -56,6 +56,9 @@ def run_model(model, x, arch):
     return model(*(x[k] for k in MODEL_KEYS))
 
 
+AMP = True  # bf16 autocast; main() turns it off with --fp32
+
+
 @torch.no_grad()
 def evaluate(model, gs: GameStore, idx: np.ndarray, B: int = 1024, H: int = 64, arch: str = "cloverb"):
     model.eval()
@@ -68,7 +71,7 @@ def evaluate(model, gs: GameStore, idx: np.ndarray, B: int = 1024, H: int = 64, 
         if arch == "chessformer":
             x.update(maia_extra(gs, g[s:s + B], ply[s:s + B]))
         x = to_dev(x, dev)
-        with torch.autocast(dev.type, dtype=torch.bfloat16):
+        with torch.autocast(dev.type, dtype=torch.bfloat16, enabled=AMP):
             lo = run_model(model, x, arch)[0]
         lo = lo.float().masked_fill(~x["legal"], float("-inf"))
         t = x["target"]
@@ -126,6 +129,9 @@ def main():
     ap.add_argument("--compile", action="store_true")
     ap.add_argument("--threads", type=int, default=4)
     ap.add_argument("--device", default="cpu", help="cpu | cuda (attention falls back to PyTorch SDPA off the CPU)")
+    ap.add_argument("--fp32", action="store_true",
+                    help="no bf16 autocast (CPUs without AMX / AVX512-BF16 emulate bf16 GEMMs ~10x slower); "
+                         "q/k RMSNorm keeps the bf16 eps, so the model computes the same function")
     ap.add_argument("--init", default=None, help="start from these weights (a checkpoint's 'model' or 'ema'), fresh optimizer")
     ap.add_argument("--init-ema", default=None, help="EMA weights to start from (default: the --init weights)")
     ap.add_argument("--init-step", type=int, default=None, help="step to continue the LR schedule from (default: the checkpoint's)")
@@ -138,6 +144,11 @@ def main():
     ap.add_argument("--distill-w-pressure", type=float, default=None,
                     help="distillation weight when the mover has < 30 s (Maia-3 never trained there)")
     a = ap.parse_args()
+    if a.fp32:
+        global AMP
+        AMP = False
+        from . import model as model_mod
+        model_mod.QK_EPS = torch.finfo(torch.bfloat16).eps
 
     torch.set_num_threads(a.threads)
     torch.manual_seed(a.seed)
@@ -208,7 +219,7 @@ def main():
         for gparam in opt.param_groups:
             gparam["lr"] = lr
         x = to_dev(next(pf), dev)
-        with torch.autocast(dev.type, dtype=torch.bfloat16):
+        with torch.autocast(dev.type, dtype=torch.bfloat16, enabled=AMP):
             lo, v, t = run_model(fwd, x, a.arch)
         lo = lo.float().masked_fill(~x["legal"], float("-inf"))
         lp = F.cross_entropy(lo, x["target"])
