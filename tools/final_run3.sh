@@ -18,7 +18,7 @@ while [ ! -f $OUT/done ] && [ $tries -lt 30 ]; do
   tries=$((tries + 1))
   echo "$(date +%F_%T) start $tries: $MARGS" >> /home/user/runs/$RUN.log
   python -u -m cloverb.train --stores $S --teacher-cache $POOLS --out $OUT $MARGS \
-     --compile --eval-every 2000 --ckpt-every 1000 --log-every 100 >> /home/user/runs/$RUN.log 2>&1 &
+     --compile --eval-every 2000 --ckpt-every 250 --log-every 100 >> /home/user/runs/$RUN.log 2>&1 &
   TP=$!
   while kill -0 $TP 2>/dev/null; do
     sleep 60; n=$((n + 1))
