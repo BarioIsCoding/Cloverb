@@ -11,5 +11,10 @@ sample, Table~\ref{tab:maia3}); (2) the same 2,101 games with \emph{all} 141,390
 openings and time pressure; (3) fresh games from September 2026 (120k games streamed from the
 official dump, never seen by any model): 25k positions each of bullet, blitz, rapid and classical
 (all plies), and 50k blitz positions under Maia's protocol.
+During training we monitored a fixed 10k-position subset of (1) (from 2,003 of its 2,101 games). It
+decided the switch to pure distillation and the start of the learning-rate decay, so (1) and (2) are
+not strictly held out for the final model; the fresh 2026 sets (3) are. The choice between the raw and
+the averaged (EMA) final weights was made on 10k protocol positions from other ALLIE games, in none
+of the test samples.
 
 \input{sections/results}

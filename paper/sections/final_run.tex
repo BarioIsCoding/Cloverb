@@ -20,7 +20,7 @@ last 40\% of training instead of the planned 30\%. In total the model sees about
 
 \paragraph{How far distillation can go.} A student trained to match a teacher approaches the
 teacher's accuracy from below. Table~\ref{tab:teachers} scores every Maia-3 checkpoint and their
-averages on the evaluation sample used during training. The clock-aware teacher we use is 0.2 points
+averages on the 10k development subset of the ALLIE test sample. The clock-aware teacher we use is 0.2 points
 below Maia-3-79M; the best ensemble (79M, 23M and 23M-ponder, averaged logits) is 0.3 points above
 it. Distillation alone can therefore at most edge past the strongest Maia-3 under Maia's protocol.
 Beating it clearly needs what a teacher cannot supply: far more human moves, or information the
@@ -28,8 +28,8 @@ teacher does not see. Cloverb's clock, increment and 64-ply history are such inf
 matter most in exactly the positions Maia's protocol removes.
 
 \begin{table}[t]\centering\small
-\caption{Maia-3 checkpoints and their ensembles as teachers, on the 10k-position evaluation sample
-(Maia protocol). Ensembles average the members' log-probabilities (``logits'') or probabilities.}
+\caption{Maia-3 checkpoints and their ensembles as teachers, on the 10k-position development subset
+of the ALLIE test sample (Maia protocol). Ensembles average the members' log-probabilities (``logits'') or probabilities.}
 \label{tab:teachers}
 \begin{tabular}{lrrr}\toprule
 Model & Top-1 & Top-3 & CE\\\midrule

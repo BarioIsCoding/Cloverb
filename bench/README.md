@@ -7,7 +7,8 @@ Point `CLOVERB_DATA` at a directory whose `bench/` holds these files (or copy th
 |---|---|
 | `allie2022.npz` | ALLIE 2022 Lichess blitz test set (18,239 games), from the [ALLIE repository](https://github.com/y0mingzhang/allie) (MIT), converted with `GameStore.from_allie_jsonl` |
 | `allie_sub100k.npy` | 100,016 positions (2,101 whole games) of Maia's protocol: plies 11+, stop at the first ply with < 30 s on the mover's clock |
-| `allie_sub10k.npy` | 10k-position subset of the above used for evaluation during training |
+| `allie_sub10k.npy` | 10k-position subset of the above, monitored during training (development set) |
+| `allie_sel10k.npy` | 10k Maia-protocol positions from ALLIE games in none of the samples above; chose raw vs. EMA final weights |
 | `allie_sub_allplies.npy` | every ply (141,390) of the same 2,101 games, openings and time pressure included |
 | `lichess2026-09.npz` | 120k games streamed from the September 2026 Lichess dump (CC0), unseen by every model |
 | `fresh_*_all.npy` | 25k positions each of bullet / blitz / rapid / classical from those games, all plies |

@@ -170,7 +170,7 @@ def main():
     info = dict(variant=a.variant, params=int(nparams), positions=int(len(idx)), top1=top1, top1_ci=se(top1),
                 top3=top3, top3_ci=se(top3), ce=float(ce.mean()), history=H, history_mode=a.history_mode,
                 dtype="fp32" if a.fp32 else "bf16", seconds=dt, forward_seconds=fwd, pos_per_s=len(idx) / dt,
-                store=a.store, subset=a.subset, protocol=a.protocol)
+                store=a.store, subset=a.subset, protocol="subset" if a.subset else a.protocol)
     np.savez(a.out, idx=idx, ce=ce, rank=rank)
     Path(a.out).with_suffix(".json").write_text(json.dumps(info, indent=2) + "\n")
     print(json.dumps(info), flush=True)

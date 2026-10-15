@@ -1,9 +1,10 @@
 """Generate every final table, figure and summary from results/ (run after the final evaluation).
 
-Writes paper/tables/{main,fresh,ablation,infer,abstract_results}.tex, paper/sections/final_text.tex,
-paper/figures/*.png|pdf and results/summary.md.
+Writes paper/tables/{main,fresh,ablation,timing,infer,abstract_results}.tex, paper/figures/*.png|pdf and
+results/summary.md. The prose discussing them (paper/sections/final_text.tex) is written by hand.
 """
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -16,6 +17,7 @@ import make_figures as mf  # noqa: E402
 R = ROOT / "results"
 TAB = ROOT / "paper" / "tables"
 CLOV = R / "cloverb" / "final"
+BENCH = Path("/home/user/data/bench")
 MAIA = ["maia3-79m", "maia3-23m-ponder", "maia3-23m", "maia3-5m"]
 LAB = {"maia3-79m": "Maia-3 79M", "maia3-23m-ponder": "Maia-3 23M-ponder", "maia3-23m": "Maia-3 23M",
        "maia3-5m": "Maia-3 5M", "cloverb": "\\textbf{Cloverb} (9.2M)"}
@@ -54,15 +56,24 @@ def main_table():
     (TAB / "main.tex").write_text(tex)
 
 
+def n_games(store, subset):
+    off = np.load(store)["offsets"]
+    return len(np.unique(np.searchsorted(off, np.load(subset), side="right") - 1))
+
+
 def fresh_table():
     sets = [("fresh_blitz_maia", "Blitz (Maia prot.)"), ("fresh_bullet_all", "Bullet"), ("fresh_blitz_all", "Blitz"),
             ("fresh_rapid_all", "Rapid"), ("fresh_classical_all", "Classical")]
+    ng = {s: n_games(BENCH / "lichess2026-09.npz", BENCH / f"{s}.npy") for s, _ in sets}
+    lo, hi = min(ng[s] for s, _ in sets[1:]), max(ng[s] for s, _ in sets[1:])
     rows = []
     for m in MAIA + ["cloverb"]:
         rows.append(f"{LAB[m]} & " + " & ".join(f"{cell(res(m, s))} / {cell(res(m, s), 'top3', nd=1)}" for s, _ in sets) + " \\\\")
     tex = (r"\begin{table*}[t]\centering\small" "\n"
            r"\caption{Fresh games from September 2026 (unseen by every model), top-1 / top-3 (\%). All-plies sets "
-           r"include openings and time pressure; 25k positions each (classical: 615 games).}\label{tab:fresh}" "\n"
+           r"are every ply of whole games, about 25k positions per set from " f"{lo}--{hi}" r" games each; the "
+           r"Maia-protocol set has 50k positions from " f"{ng['fresh_blitz_maia']:,}" r" games. Positions of one game are "
+           r"correlated, so differences below about one point are within noise.}\label{tab:fresh}" "\n"
            r"\begin{tabular}{l" + "c" * len(sets) + r"}\toprule" "\n"
            "Model & " + " & ".join(l for _, l in sets) + r"\\\midrule" "\n" + "\n".join(rows) +
            "\n\\bottomrule\\end{tabular}\\end{table*}\n")
@@ -110,16 +121,24 @@ def timing_table():
 
 
 def infer_table():
-    p = R / "infer_speed.json"
-    if not p.exists():
-        return
-    d = json.loads(p.read_text())
     rows = []
-    for k, v in d.items():
-        name, prec, batch, thr = [x.strip() for x in k.split("|")]
-        rows.append(f"{name} & {prec} & {batch.replace('batch ', '')} & {thr.replace(' thr', '')} & {v['ms']:.2f} & {v['pos_per_s']:.0f} \\\\")
+    p = R / "infer_speed.json"
+    if p.exists():
+        for k, v in json.loads(p.read_text()).items():
+            name, prec, batch, thr = [x.strip() for x in k.split("|")]
+            rows.append(f"{name} & {prec} & {batch.replace('batch ', '')} & {thr.replace(' thr', '')} & {v['ms']:.2f} & {v['pos_per_s']:.0f} \\\\")
+    p = R / "engine_speed.txt"
+    if p.exists():  # e.g. "AMX bf16: 1.234 ms/position (1 thread), top move e2e4 0.123"
+        for line in p.read_text().splitlines():
+            m = re.match(r"^(.+?): ([\d.]+) ms/position \((\d+) threads?\)", line)
+            if m:
+                ms = float(m.group(2))
+                rows.append(f"Cloverb C engine$^*$ & {m.group(1)} & 1 & {m.group(3)} & {ms:.2f} & {1000 / ms:.0f} \\\\")
+    if not rows:
+        return
     tex = (r"\begin{table}[t]\centering\small" "\n"
-           r"\caption{Inference on the same 4-core CPU (model forward only; latency = batch 1, 1 thread).}\label{tab:infer}" "\n"
+           r"\caption{Inference on the same 4-core CPU (PyTorch rows: model forward only; latency = batch 1, 1 thread). "
+           r"$^*$Standalone C engine, including input encoding and the softmax over legal moves.}\label{tab:infer}" "\n"
            r"\begin{tabular}{llrrrr}\toprule" "\n" r"Model & Precision & Batch & Threads & ms & pos/s\\\midrule" "\n"
            + "\n".join(rows) + "\n\\bottomrule\\end{tabular}\\end{table}\n")
     (TAB / "infer.tex").write_text(tex)
@@ -130,13 +149,13 @@ def figures():
     fresh = "/home/user/data/bench/lichess2026-09.npz"
     m = [(LAB[x].replace("\\textbf{", "").replace("}", ""), str(R / "maia3" / f"allie100k_{x}.npz")) for x in ["maia3-79m", "maia3-23m", "maia3-5m"]]
     m.insert(0, ("Cloverb", str(CLOV / "allie100k.npz")))
-    mf.by_bins(allie, m, str(ROOT / "paper/figures/by_elo.png"), "elo", list(range(600, 3000, 200)), "mover rating",
-               "Top-1 by mover rating, ALLIE (Maia protocol)")
     c = [("Cloverb", str(CLOV / "allieall.npz")), ("Maia-3 79M", str(R / "maia3/allieall_maia3-79m.npz")),
          ("Maia-3 23M-ponder (clock)", str(R / "maia3/allieall_maia3-23m-ponder.npz")),
          ("Maia-3 5M", str(R / "maia3/allieall_maia3-5m.npz"))]
     mf.by_bins(allie, c, str(ROOT / "paper/figures/by_clock.png"), "clock", [1, 5, 10, 20, 30, 45, 60, 90, 120, 180, 300],
                "time left on the mover's clock (s)", "Top-1 by time left, ALLIE (all plies)")
+    mf.by_bins(allie, m, str(ROOT / "paper/figures/by_elo.png"), "elo", list(range(600, 3000, 200)), "mover rating",
+               "Top-1 by mover rating, ALLIE (Maia protocol)")
     log = Path("/home/user/runs/final/log.jsonl")
     if log.exists():
         ref = json.loads((R / "maia3/allie10k_reference.json").read_text())

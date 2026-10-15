@@ -52,6 +52,9 @@ def by_bins(store, results, out, key, edges, xlabel, title, min_n=300):
     gs = GameStore.load(store)
     fig, ax = plt.subplots(figsize=(5.2, 3.2))
     for i, (lab, f) in enumerate(results):
+        if i > 0 and not Path(f).exists():  # a missing comparison drops its series, not the figure
+            print(f"{out}: {lab} skipped, {f} missing")
+            continue
         z = np.load(f)
         idx, rank = z["idx"], z["rank"]
         g = np.searchsorted(gs.offsets, idx, side="right") - 1
