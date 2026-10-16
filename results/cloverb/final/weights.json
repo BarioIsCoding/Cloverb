@@ -1,0 +1,17 @@
+{
+  "weights": "raw",
+  "step": 80000,
+  "selection_set": "bench/allie_sel10k.npy",
+  "selection": {
+    "raw": {
+      "top1": 0.5605,
+      "top3": 0.8349,
+      "ce": 1.3305693864822388
+    },
+    "ema": {
+      "top1": 0.5609,
+      "top3": 0.8372,
+      "ce": 1.3315545320510864
+    }
+  }
+}
