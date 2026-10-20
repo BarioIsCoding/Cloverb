@@ -1,1 +1,11 @@
-% main results table generated after the final run
+\begin{table}[t]\centering\small
+\caption{ALLIE 2022 blitz test set. Left: Maia's protocol (100,016 positions; first 10 plies and time pressure removed). Right: every ply of the same 2,101 games (141,390 positions), including openings and time trouble. Maia-3 sees both ratings; Cloverb only the mover's.}\label{tab:main}
+\begin{tabular}{lrrrrrr}\toprule
+ & \multicolumn{3}{c}{Maia protocol} & \multicolumn{3}{c}{All plies}\\
+Model & Top-1 & Top-3 & CE & Top-1 & Top-3 & CE\\\midrule
+Maia-3 79M & 56.82 & 83.5 & 1.302 & -- & -- & -- \\
+Maia-3 23M-ponder & 56.53 & 83.3 & 1.311 & -- & -- & -- \\
+Maia-3 23M & 56.32 & 83.1 & 1.321 & -- & -- & -- \\
+Maia-3 5M & 55.27 & 82.3 & 1.365 & 54.93 & 82.3 & 1.372 \\
+\textbf{Cloverb} (9.2M) & 55.28 & 82.4 & 1.363 & 55.14 & 82.5 & 1.365 \\
+\bottomrule\end{tabular}\end{table}

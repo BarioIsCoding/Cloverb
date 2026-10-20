@@ -1,0 +1,11 @@
+\begin{table*}[t]\centering\small
+\caption{Think time and outcome, all plies with a known time spent. Mean absolute error of $\log(1+\text{seconds})$ for Cloverb's median predicted think time, for the best constant (the test set's own median, an oracle) and for the rule of thumb ``1/40 of the clock plus the increment''; correlation of predicted and actual log time; share of moves predicted within a factor of two. Right: accuracy and cross-entropy of the win/draw/loss head against the game result.}\label{tab:timing}
+\begin{tabular}{lrrrrrrr}\toprule
+ & \multicolumn{3}{c}{Log-time MAE} & & & \multicolumn{2}{c}{Outcome}\\
+Test set & Cloverb & Constant & Rule & Corr. & $\le2\times$ (\%) & Acc. (\%) & CE\\\midrule
+ALLIE 2022 blitz & 0.438 & 0.630 & 0.696 & 0.68 & 70.9 & 61.5 & 0.764 \\
+Fresh bullet & 0.337 & 0.458 & 0.523 & 0.64 & 72.6 & 62.0 & 0.696 \\
+Fresh blitz & 0.430 & 0.611 & 0.713 & 0.67 & 71.4 & 62.1 & 0.747 \\
+Fresh rapid & 0.529 & 0.733 & 0.981 & 0.65 & 65.7 & 64.5 & 0.695 \\
+Fresh classical & 0.679 & 0.892 & 1.487 & 0.61 & 55.7 & 65.8 & 0.730 \\
+\bottomrule\end{tabular}\end{table*}

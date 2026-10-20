@@ -1,1 +1,11 @@
-% generated after the final run
+\begin{table}[t]\centering\small
+\caption{What the final model uses, measured by removing inputs at evaluation time on the ALLIE sets (the clock is replaced by another position's fraction of base time left).}\label{tab:ablation}
+\begin{tabular}{lrrr}\toprule
+Evaluation & Top-1 & Top-3 & CE\\\midrule
+Cloverb (full inputs) & 55.28 & 82.4 & 1.363 \\
+\quad history cut to 8 plies & 54.81 & 82.0 & 1.384 \\
+\quad no history & 50.38 & 78.6 & 1.557 \\
+\quad clock shuffled & 55.04 & 82.2 & 1.371 \\
+Cloverb, all plies & 55.14 & 82.5 & 1.365 \\
+\quad clock shuffled & 54.81 & 82.1 & 1.386 \\
+\bottomrule\end{tabular}\end{table}

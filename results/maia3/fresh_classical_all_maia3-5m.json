@@ -1,0 +1,19 @@
+{
+  "variant": "maia3-5m",
+  "params": 5230084,
+  "positions": 25023,
+  "top1": 0.5369859729049274,
+  "top1_ci": 0.0061782421800582,
+  "top3": 0.8150501538584503,
+  "top3_ci": 0.004810669679301598,
+  "ce": 1.4270130395889282,
+  "history": 8,
+  "history_mode": "own",
+  "dtype": "bf16",
+  "seconds": 36.098545644999945,
+  "forward_seconds": 35.33854235200067,
+  "pos_per_s": 693.1858210045635,
+  "store": "/home/user/data/bench/lichess2026-09.npz",
+  "subset": "/home/user/data/bench/fresh_classical_all.npy",
+  "protocol": "subset"
+}

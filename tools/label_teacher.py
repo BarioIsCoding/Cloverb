@@ -5,6 +5,7 @@ top-k moves (vocabulary index, probability). Training on the pool for several ep
 teacher's cost (see cloverb.train --teacher-cache).
 
 usage: python tools/label_teacher.py --stores S1.npz ... --out pool_000.npz --n 2000000 [--teacher maia3-23m] [--device cuda]
+       [--min-base SECONDS] [--exclude games.npz]
 """
 import argparse
 import sys
@@ -31,11 +32,19 @@ def main():
     ap.add_argument("--seed", type=int, default=1234)
     ap.add_argument("--elo-alpha", type=float, default=0.3)
     ap.add_argument("--device", default="cpu")
+    ap.add_argument("--min-base", type=int, default=None, help="only games with at least this base time (seconds)")
+    ap.add_argument("--exclude", default=None, help="npz with a 'games' array of held-out game indices")
     a = ap.parse_args()
     dev = torch.device(a.device)
     torch.set_num_threads(4)
     gs = concat_stores(a.stores)
-    sampler = Sampler(gs, SamplerConfig(elo_alpha=a.elo_alpha, seed=a.seed))
+    held = np.zeros(gs.n_games, bool)
+    if a.min_base is not None:
+        held |= gs.base < a.min_base
+    if a.exclude:
+        held[np.load(a.exclude)["games"]] = True
+    sampler = Sampler(gs, SamplerConfig(elo_alpha=a.elo_alpha, seed=a.seed),
+                      holdout_games=np.flatnonzero(held) if held.any() else None)
     teacher = torch.compile(FastMaia3(a.teacher).to(dev))
     G = np.empty(a.n, np.int64); P = np.empty(a.n, np.int32)
     IDX = np.empty((a.n, a.k), np.int16); PR = np.empty((a.n, a.k), np.float16)

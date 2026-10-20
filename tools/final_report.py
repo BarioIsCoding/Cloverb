@@ -1,7 +1,7 @@
 """Generate every final table, figure and summary from results/ (run after the final evaluation).
 
-Writes paper/tables/{main,fresh,ablation,timing,infer,abstract_results}.tex, paper/figures/*.png|pdf and
-results/summary.md. The prose discussing them (paper/sections/final_text.tex) is written by hand.
+Writes paper/tables/{main,fresh,ablation,timing,segments,infer,abstract_results}.tex, paper/figures/*.png|pdf,
+results/paired.json and results/summary.md. The prose discussing them (paper/sections/final_text.tex) is written by hand.
 """
 import json
 import re
@@ -120,6 +120,91 @@ def timing_table():
     (TAB / "timing.tex").write_text(tex)
 
 
+STORE = {"allie": BENCH / "allie2022.npz", "fresh": BENCH / "lichess2026-09.npz"}
+_stores = {}
+
+
+def store_of(stem):
+    k = "allie" if stem.startswith("allie") else "fresh"
+    if k not in _stores:
+        z = np.load(STORE[k])
+        _stores[k] = {f: z[f] for f in ("offsets", "clock")}
+    return _stores[k]
+
+
+def clustered(d, game):
+    """Mean of per-position values d and its 95% half-width with positions clustered by game."""
+    _, g = np.unique(game, return_inverse=True)
+    s, n = np.bincount(g, d), np.bincount(g)
+    m = s.sum() / n.sum()
+    k = len(n)
+    return m, 1.96 * np.sqrt(k / (k - 1) * np.sum((s - m * n) ** 2)) / n.sum()
+
+
+def paired():
+    """Cloverb minus each Maia-3 model in top-1 on every test set, paired on positions, clustered by game."""
+    out = {}
+    for stem in ["allie100k", "allieall", "fresh_blitz_maia", "fresh_bullet_all", "fresh_blitz_all", "fresh_rapid_all",
+                 "fresh_classical_all"]:
+        c = npz("cloverb", stem)
+        if c is None:
+            continue
+        game = np.searchsorted(store_of(stem)["offsets"], c["idx"], side="right") - 1
+        for m in MAIA:
+            z = npz(m, stem)
+            if z is None:
+                continue
+            assert (z["idx"] == c["idx"]).all(), (m, stem)
+            d, hw = clustered((c["rank"] == 0).astype(float) - (z["rank"] == 0), game)
+            out.setdefault(stem, {})[m] = {"top1_diff": 100 * d, "ci95": 100 * hw, "positions": int(len(game))}
+    (R / "paired.json").write_text(json.dumps(out, indent=2) + "\n")
+
+
+def segments(stem, model):
+    """Top-1 (%) on openings (ply < 10), normal play and time trouble (< 30 s on the mover's clock)."""
+    z = npz(model, stem)
+    if z is None:
+        return None
+    st = store_of(stem)
+    idx = z["idx"]
+    ply = idx - st["offsets"][np.searchsorted(st["offsets"], idx, side="right") - 1]
+    clk = st["clock"][idx]
+    seg = {"open": ply < 10, "normal": (ply >= 10) & (clk >= 30), "pressure": (ply >= 10) & (clk < 30)}
+    return {k: (100 * float(np.mean(z["rank"][v] == 0)), int(v.sum())) for k, v in seg.items()}
+
+
+def segment_table():
+    fresh = ["fresh_bullet_all", "fresh_blitz_all", "fresh_rapid_all", "fresh_classical_all"]
+    rows, ns = [], {}
+    for m in MAIA + ["cloverb"]:
+        a = segments("allieall", m)
+        fs = [segments(s, m) for s in fresh]
+        if a is None:
+            continue
+        cells = [f"{a[k][0]:.2f}" for k in ("open", "normal", "pressure")]
+        ns["allie"] = [a[k][1] for k in ("open", "normal", "pressure")]
+        if all(fs):  # pooled over the four fresh all-plies sets
+            tot = {k: sum(f[k][1] for f in fs) for k in ("open", "normal", "pressure")}
+            cells += [f"{sum(f[k][0] * f[k][1] for f in fs) / tot[k]:.2f}" for k in ("open", "normal", "pressure")]
+            ns["fresh"] = [tot[k] for k in ("open", "normal", "pressure")]
+        else:
+            cells += ["--"] * 3
+        rows.append(f"{LAB[m]} & " + " & ".join(cells) + " \\\\")
+    if not rows:
+        return
+    n = lambda k: ", ".join(f"{x:,}" for x in ns.get(k, []))  # noqa: E731
+    tex = (r"\begin{table}[t]\centering\small" "\n"
+           r"\caption{Top-1 (\%) by game phase on all plies: openings (first 10 plies), normal play, and time "
+           r"trouble (later plies with under 30\,s on the mover's clock, which Maia's protocol and training data "
+           r"exclude). ALLIE: 2022 blitz (" + n("allie") + r" positions); fresh: the four September 2026 all-plies "
+           r"sets pooled (" + n("fresh") + r").}\label{tab:segments}" "\n"
+           r"\begin{tabular}{lrrrrrr}\toprule" "\n"
+           r" & \multicolumn{3}{c}{ALLIE, all plies} & \multicolumn{3}{c}{Fresh 2026, all plies}\\" "\n"
+           r"Model & Open. & Normal & $<$30\,s & Open. & Normal & $<$30\,s\\\midrule" "\n"
+           + "\n".join(rows) + "\n\\bottomrule\\end{tabular}\\end{table}\n")
+    (TAB / "segments.tex").write_text(tex)
+
+
 def infer_table():
     rows = []
     p = R / "infer_speed.json"
@@ -161,7 +246,7 @@ def figures():
                "time left on the mover's clock (s)", "Top-1 by time left, ALLIE (all plies)")
     mf.by_bins(allie, m, str(ROOT / "paper/figures/by_elo.png"), "elo", list(range(600, 3000, 200)), "mover rating",
                "Top-1 by mover rating, ALLIE (Maia protocol)")
-    log = Path("/home/user/runs/final/log.jsonl")
+    log = R / "runs" / "final.jsonl"
     if log.exists():
         ref = json.loads((R / "maia3/allie10k_reference.json").read_text())
         mf.learning([("Cloverb final run", str(log))], str(ROOT / "paper/figures/final_curve.png"),
@@ -187,7 +272,7 @@ def summary():
 
 
 if __name__ == "__main__":
-    for f in (main_table, fresh_table, ablation_table, timing_table, infer_table, summary, figures):
+    for f in (main_table, fresh_table, ablation_table, timing_table, segment_table, paired, infer_table, summary, figures):
         try:
             f()
         except Exception as e:  # keep going: a missing result should not block the rest

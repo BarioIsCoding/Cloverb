@@ -1,0 +1,19 @@
+{
+  "variant": "maia3-23m-ponder",
+  "params": 22952993,
+  "positions": 25040,
+  "top1": 0.5373801916932908,
+  "top1_ci": 0.006175780447721074,
+  "top3": 0.8027156549520766,
+  "top3_ci": 0.00492908250621028,
+  "ce": 1.4491610527038574,
+  "history": 8,
+  "history_mode": "own",
+  "dtype": "bf16",
+  "seconds": 270.2351389560001,
+  "forward_seconds": 261.4376713799984,
+  "pos_per_s": 92.66004449583083,
+  "store": "/home/user/data/bench/lichess2026-09.npz",
+  "subset": "/home/user/data/bench/fresh_bullet_all.npy",
+  "protocol": "subset"
+}

@@ -1,16 +1,16 @@
 # Cloverb
 
 Cloverb is a human-like chess engine: a square-token transformer that predicts the move a human
-of a given strength would play, superseding Chessformer / Maia-3. Its inputs are what a player
-actually has at the board:
+of a given strength would play, rebuilt from Chessformer / Maia-3 around the clock and the game's
+moves. Its inputs are what a player actually has at the board:
 
 * the **player's Elo** (only the side to move; Maia-3 also needs the opponent's),
 * the **time control**: base time in seconds and increment,
 * the **time left** on the player's clock,
 * the position and the **last 64 plies** of the game (Maia-3: 8 board snapshots).
 
-Everything here (data processing, the Maia-3 benchmark, training, evaluation) was done on a single
-4-core Intel Xeon (AMX) CPU without a GPU.
+Everything here (data processing, the Maia-3 benchmark, training, evaluation) was done on 4-core Intel
+Xeon CPUs without a GPU (mostly with AMX; the container moved between hosts during the work).
 
 * Paper: [`paper/cloverb.pdf`](paper/cloverb.pdf)
 * Maia-3 reproduction and critique: [`docs/critique.md`](docs/critique.md)

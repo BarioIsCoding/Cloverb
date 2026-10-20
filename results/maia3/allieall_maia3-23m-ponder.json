@@ -1,0 +1,19 @@
+{
+  "variant": "maia3-23m-ponder",
+  "params": 22952993,
+  "positions": 141390,
+  "top1": 0.5619775090176109,
+  "top1_ci": 0.0025861540850438034,
+  "top3": 0.8330575005304477,
+  "top3_ci": 0.0019438720233327731,
+  "ce": 1.3205422163009644,
+  "history": 8,
+  "history_mode": "own",
+  "dtype": "bf16",
+  "seconds": 567.756008438,
+  "forward_seconds": 561.3134143300031,
+  "pos_per_s": 249.03303161685528,
+  "store": "/home/user/data/bench/allie2022.npz",
+  "subset": "/home/user/data/bench/allie_sub_allplies.npy",
+  "protocol": "subset"
+}

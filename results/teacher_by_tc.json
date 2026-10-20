@@ -1,0 +1,23 @@
+{
+  "games_per_bucket": 120,
+  "positions": {
+    "blitz 3-5 min": 8559,
+    "rapid 10 min": 8514,
+    "rapid 15-20 min": 8392,
+    "classical 25+ min": 8247
+  },
+  "teachers": {
+    "maia3-23m-ponder": {
+      "blitz 3-5 min": 57.38988199556023,
+      "rapid 10 min": 54.39276485788114,
+      "rapid 15-20 min": 52.34747378455672,
+      "classical 25+ min": 37.95319510124894
+    },
+    "maia3-23m": {
+      "blitz 3-5 min": 57.144526229699736,
+      "rapid 10 min": 55.33239370448673,
+      "rapid 15-20 min": 54.802192564346996,
+      "classical 25+ min": 55.60809991512065
+    }
+  }
+}
