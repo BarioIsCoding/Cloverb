@@ -78,7 +78,9 @@ separate the two.
 \item \emph{No clock, and time pressure is removed from training and evaluation.} The unreleased-in-code
 \textsc{Maia3-23M-ponder} checkpoint, which does read the clock, is better even on the
 pressure-free protocol (top-1 $+0.21\pm0.15$ points, paired and clustered by game; cross-entropy
-1.311 vs.\ 1.321; Table~\ref{tab:maia3}).
+1.311 vs.\ 1.321; Table~\ref{tab:maia3}), but it takes the clock as raw seconds and collapses at long
+time controls (38\% top-1 at a base time of 25 minutes or more, against 56\% for Maia-3-23M;
+Section~\ref{sec:final}).
 \item \emph{Elo as concatenated soft embeddings} is affine in the rating (the paper concedes it is
 equivalent to a scalar) yet fills 256 of 352 input channels on all 64 tokens.
 \item \emph{Missing state}: castling rights and the 50-move counter are not encoded in the human

@@ -32,6 +32,25 @@ Beating it clearly needs what a teacher cannot supply: far more human moves, or 
 teacher does not see. Cloverb's clock, increment and 64-ply history are such information, and they
 matter most in exactly the positions Maia's protocol removes.
 
+\paragraph{A teacher outside its range.} The fresh 2026 games exposed a failure that the blitz-only
+ALLIE set cannot show: on classical games the 80k-step model matched only 40.2\% of moves, against
+53.7\% for Maia-3-5M, and its deficit grew steadily with the base time. To locate the cause without
+touching the test sets we held out 480 games of the training months, 120 per base-time bucket, and
+scored both teachers on all their plies (Table~\ref{tab:tcfix}). The clock-aware Maia-3-23M-ponder
+collapses at long time controls (38.0\% at 25 minutes or more, against 55.6\% for Maia-3-23M, which
+does not read the clock) and is already worse at 10 and 15--20 minutes; it is only marginally better in
+blitz. Maia-3 is trained on blitz games only~\cite{chessformer}, and the ponder model's time inputs are
+raw seconds divided by 100, so a 30-minute game feeds it values about ten times larger than any it saw
+in training; the models without a clock input cannot be pushed out of range this way. Cloverb, trained
+with pure teacher targets, had faithfully learned the collapse. We therefore kept the ponder labels only for games with
+a base time under 10 minutes (78.5\% of the pool entries), labelled 2.6M positions of games with a base
+time of 10 minutes or more with Maia-3-23M (the held-out games excluded), and continued training the
+final weights on both pools for 8k steps with a fresh schedule (peak learning rate $3\cdot10^{-4}$,
+300 warm-up steps, linear decay over the second half to 2\%, EMA decay 0.999, other settings
+unchanged). Raw or EMA weights were again chosen by cross-entropy on held-out positions only (the
+10k ALLIE selection positions plus the 480 held-out games).
+\IfFileExists{tables/tcfix.tex}{\input{tables/tcfix}}{}
+
 \begin{table}[t]\centering\small
 \caption{Maia-3 checkpoints and their ensembles as teachers, on the 10k-position development subset
 of the ALLIE test sample (Maia protocol). Ensembles average the members' log-probabilities (``logits'') or probabilities.}

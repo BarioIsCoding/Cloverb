@@ -28,7 +28,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--ckpt", required=True)
     ap.add_argument("--bin", required=True)
-    ap.add_argument("--engine", action="append", required=True)
+    ap.add_argument("--engine", action="append", required=True, help="PATH or LABEL=PATH")
     ap.add_argument("--store", required=True)
     ap.add_argument("--n", type=int, default=500)
     ap.add_argument("--seed", type=int, default=0)
@@ -40,7 +40,8 @@ def main():
     H = m.cfg.hist
     gs = GameStore.load(a.store)
     rng = np.random.default_rng(a.seed)
-    res = {e: dict(maxdp=[], kl=[], top=[]) for e in a.engine}
+    engines = dict(e.split("=", 1) if "=" in e else (e, e) for e in a.engine)
+    res = {e: dict(maxdp=[], kl=[], top=[]) for e in engines}
     n = 0
     while n < a.n:
         g = int(rng.integers(len(gs.offsets) - 1))
@@ -64,8 +65,8 @@ def main():
         ref = lp[mask] - lp[mask].max()
         p = np.exp(ref) / np.exp(ref).sum()
         args = [str(elo), str(base), str(inc), str(clk)] + [decode_uci(int(x)) for x in mv]
-        for e in a.engine:
-            out = subprocess.run([e, a.bin, "dump", *args], capture_output=True, check=True).stdout
+        for e, path in engines.items():
+            out = subprocess.run([path, a.bin, "dump", *args], capture_output=True, check=True).stdout
             cl = np.frombuffer(out, np.float32)[:4352][mask]
             cl = cl - cl.max()
             q = np.exp(cl) / np.exp(cl).sum()

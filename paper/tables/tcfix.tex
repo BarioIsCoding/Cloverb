@@ -1,0 +1,7 @@
+\begin{table}[t]\centering\small
+\caption{Top-1 (\%) by base time on 480 held-out games of the training months (120 per column, all plies; 8,559, 8,514, 8,392, 8,247 positions), kept out of the fine-tuning pools (the original pools hold 2,280 of their positions among 12M entries). The clock-aware teacher collapses at long time controls; the fix relabels games with a base time of 10 minutes or more with Maia-3-23M.}\label{tab:tcfix}
+\begin{tabular}{lrrrr}\toprule
+Model & 3--5 min & 10 min & 15--20 min & 25+ min\\\midrule
+Maia-3 23M-ponder (teacher) & 57.4 & 54.4 & 52.3 & 38.0 \\
+Maia-3 23M (teacher) & 57.1 & 55.3 & 54.8 & 55.6 \\
+\bottomrule\end{tabular}\end{table}

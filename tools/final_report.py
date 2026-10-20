@@ -1,6 +1,6 @@
 """Generate every final table, figure and summary from results/ (run after the final evaluation).
 
-Writes paper/tables/{main,fresh,ablation,timing,segments,infer,abstract_results}.tex, paper/figures/*.png|pdf,
+Writes paper/tables/{main,fresh,ablation,timing,segments,tcfix,infer,abstract_results}.tex, paper/figures/*.png|pdf,
 results/paired.json and results/summary.md. The prose discussing them (paper/sections/final_text.tex) is written by hand.
 """
 import json
@@ -19,17 +19,24 @@ TAB = ROOT / "paper" / "tables"
 CLOV = R / "cloverb" / "final"
 BENCH = Path("/home/user/data/bench")
 MAIA = ["maia3-79m", "maia3-23m-ponder", "maia3-23m", "maia3-5m"]
+V80K = R / "cloverb" / "v80k"   # the 80k-step model before the long time-control fine-tune
 LAB = {"maia3-79m": "Maia-3 79M", "maia3-23m-ponder": "Maia-3 23M-ponder", "maia3-23m": "Maia-3 23M",
-       "maia3-5m": "Maia-3 5M", "cloverb": "\\textbf{Cloverb} (9.2M)"}
+       "maia3-5m": "Maia-3 5M", "cloverb": "\\textbf{Cloverb} (9.2M)", "cloverb80k": "\\quad before the fix (80k steps)"}
+CLOVERBS = ["cloverb", "cloverb80k"]
+
+
+def path(model, stem, ext):
+    d = {"cloverb": CLOV, "cloverb80k": V80K}.get(model)
+    return (d / f"{stem}.{ext}") if d else (R / "maia3" / f"{stem}_{model}.{ext}")
 
 
 def res(model, stem):
-    p = (CLOV / f"{stem}.json") if model == "cloverb" else (R / "maia3" / f"{stem}_{model}.json")
+    p = path(model, stem, "json")
     return json.loads(p.read_text()) if p.exists() else None
 
 
 def npz(model, stem):
-    p = (CLOV / f"{stem}.npz") if model == "cloverb" else (R / "maia3" / f"{stem}_{model}.npz")
+    p = path(model, stem, "npz")
     return np.load(p) if p.exists() else None
 
 
@@ -41,8 +48,10 @@ def cell(d, k="top1", pct=True, nd=2):
 
 def main_table():
     rows = []
-    for m in MAIA + ["cloverb"]:
+    for m in MAIA + CLOVERBS:
         a, b = res(m, "allie100k"), res(m, "allieall")
+        if a is None and b is None:
+            continue
         rows.append(f"{LAB[m]} & {cell(a)} & {cell(a, 'top3', nd=1)} & {cell(a, 'ce', False)} & "
                     f"{cell(b)} & {cell(b, 'top3', nd=1)} & {cell(b, 'ce', False)} \\\\")
     tex = (r"\begin{table}[t]\centering\small" "\n"
@@ -67,7 +76,9 @@ def fresh_table():
     ng = {s: n_games(BENCH / "lichess2026-09.npz", BENCH / f"{s}.npy") for s, _ in sets}
     lo, hi = min(ng[s] for s, _ in sets[1:]), max(ng[s] for s, _ in sets[1:])
     rows = []
-    for m in MAIA + ["cloverb"]:
+    for m in MAIA + CLOVERBS:
+        if res(m, sets[0][0]) is None:
+            continue
         rows.append(f"{LAB[m]} & " + " & ".join(f"{cell(res(m, s))} / {cell(res(m, s), 'top3', nd=1)}" for s, _ in sets) + " \\\\")
     tex = (r"\begin{table*}[t]\centering\small" "\n"
            r"\caption{Fresh games from September 2026 (unseen by every model), top-1 / top-3 (\%). All-plies sets "
@@ -150,7 +161,7 @@ def paired():
         if c is None:
             continue
         game = np.searchsorted(store_of(stem)["offsets"], c["idx"], side="right") - 1
-        for m in MAIA:
+        for m in MAIA + ["cloverb80k"]:
             z = npz(m, stem)
             if z is None:
                 continue
@@ -176,7 +187,7 @@ def segments(stem, model):
 def segment_table():
     fresh = ["fresh_bullet_all", "fresh_blitz_all", "fresh_rapid_all", "fresh_classical_all"]
     rows, ns = [], {}
-    for m in MAIA + ["cloverb"]:
+    for m in MAIA + CLOVERBS:
         a = segments("allieall", m)
         fs = [segments(s, m) for s in fresh]
         if a is None:
@@ -203,6 +214,35 @@ def segment_table():
            r"Model & Open. & Normal & $<$30\,s & Open. & Normal & $<$30\,s\\\midrule" "\n"
            + "\n".join(rows) + "\n\\bottomrule\\end{tabular}\\end{table}\n")
     (TAB / "segments.tex").write_text(tex)
+
+
+def tc_table():
+    """Top-1 by base time on 480 held-out training games: the two teachers and Cloverb before/after the fix."""
+    t = json.loads((R / "teacher_by_tc.json").read_text())
+    S = Path("/home/user/data/store/merged4")
+    off, base = np.load(S / "offsets.npy"), np.load(S / "base.npy")
+    sys.path.insert(0, str(ROOT / "tools"))
+    from teacher_by_tc import BUCKETS, bucket_of
+    names = [b[0] for b in BUCKETS]
+    rows = [f"{LAB[m]} (teacher) & " + " & ".join(f"{t['teachers'][m][n]:.1f}" for n in names) + " \\\\"
+            for m in ("maia3-23m-ponder", "maia3-23m") if m in t["teachers"]]
+    for m, lab in (("cloverb80k", "Cloverb, 80k steps (before)"), ("cloverb", "\\textbf{Cloverb}, fine-tuned (after)")):
+        z = npz(m, "trainval_tc")
+        if z is None:
+            continue
+        b = bucket_of(base[np.searchsorted(off, z["idx"], side="right") - 1])
+        rows.append(f"{lab} & " + " & ".join(f"{100 * np.mean(z['rank'][b == i] == 0):.1f}" for i in range(len(names)))
+                    + " \\\\")
+    tex = (r"\begin{table}[t]\centering\small" "\n"
+           r"\caption{Top-1 (\%) by base time on 480 held-out games of the training months (120 per column, all "
+           r"plies; " + ", ".join(f"{v:,}" for v in t["positions"].values()) + r" positions), kept out of the fine-tuning pools (the original pools hold 2,280 of their positions among "
+           r"12M entries). "
+           r"The clock-aware teacher collapses at long time controls; the fix relabels games with a base time of 10 "
+           r"minutes or more with Maia-3-23M.}\label{tab:tcfix}" "\n"
+           r"\begin{tabular}{lrrrr}\toprule" "\n"
+           r"Model & 3--5 min & 10 min & 15--20 min & 25+ min\\\midrule" "\n" + "\n".join(rows) +
+           "\n\\bottomrule\\end{tabular}\\end{table}\n")
+    (TAB / "tcfix.tex").write_text(tex)
 
 
 def infer_table():
@@ -272,7 +312,8 @@ def summary():
 
 
 if __name__ == "__main__":
-    for f in (main_table, fresh_table, ablation_table, timing_table, segment_table, paired, infer_table, summary, figures):
+    for f in (main_table, fresh_table, ablation_table, timing_table, segment_table, tc_table, paired, infer_table, summary,
+              figures):
         try:
             f()
         except Exception as e:  # keep going: a missing result should not block the rest
