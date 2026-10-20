@@ -1,0 +1,20 @@
+{
+  "ckpt": "checkpoints/cloverb.pt",
+  "store": "/home/user/data/bench/lichess2026-09.npz",
+  "positions": 500,
+  "engines": {
+    "AMX bf16 build (-march=native)": {
+      "max_abs_dp": 0.0026265084743499756,
+      "mean_max_abs_dp": 0.0005084188470500521,
+      "mean_kl": 2.411573924959498e-06,
+      "top_move_agree": 1.0
+    },
+    "AVX-512 fp32 build (-march=native -mno-amx-tile -mno-amx-bf16 -mno-amx-int8)": {
+      "max_abs_dp": 2.175569534301758e-06,
+      "mean_max_abs_dp": 1.7200876027345658e-07,
+      "mean_kl": -8.236257346583286e-09,
+      "top_move_agree": 1.0
+    }
+  },
+  "command": "python tools/check_engine.py --ckpt checkpoints/cloverb.pt --bin checkpoints/cloverb.bin --engine <amx> --engine <fp32> --store bench/lichess2026-09.npz --n 500"
+}

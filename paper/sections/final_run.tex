@@ -3,26 +3,31 @@ ReLU$^2$ MLPs of width $3d$, geometry-initialised static attention biases, no dy
 captured piece in the move history. Six pools of 2M positions each, drawn with the training sampler,
 were labelled once by Maia-3-23M-ponder (top-16 moves; about 85 minutes per pool at 390
 positions/s). Training uses AdamW ($\beta=(0.9, 0.98)$, weight decay 0.05, learning rate $10^{-3}$,
-1k warm-up steps), batch 512, gradient clipping at 1, an EMA of the weights with decay 0.9998, and
-bf16 autocast, at about 280 positions/s.
+1k warm-up steps), batch 512, gradient clipping at 1, and an EMA of the weights with decay 0.9998.
+Steps 0--74.5k ran with bf16 autocast on Intel AMX at about 240--270 positions/s; after the job moved
+to a 4-core Xeon without AMX, the last 5.5k steps (6.9\% of training) ran in fp32 without autocast,
+at about 90 positions/s, with the q/k RMSNorm keeping the bf16 build's $\epsilon$ so that the network
+computes the same function (KL $1.7\cdot10^{-5}$ nats between the two precisions).
 
 \paragraph{Switching to pure distillation mid-run.} For the first 24k steps the target mixed the
 teacher's distribution (weight 0.7) with the human move (0.3); below 30\,s on the mover's clock,
 where the teacher never trained, the mix was 0.4/0.6. Projecting the learning curve showed this
 would land near Maia-3-5M, so at step 24k we branched two 3k-step learning-rate cool-downs from
 the same checkpoint on identical batches. With the human move removed outside time trouble, the
-cooled-down model reached a cross-entropy of 1.3970 and 54.36\% top-1, against 1.3996 and 54.19\%
-with the mixed target. Its raw (non-EMA) cross-entropy was already 0.008 lower halfway through the
-cool-down, consistent with less gradient noise. The run continued from step 24k with pure teacher
+cooled-down raw (non-EMA) weights reached a cross-entropy of 1.3970 and 54.36\% top-1, against
+1.3996 and 54.19\% with the mixed target (EMA weights: 1.4032 and 54.10\% vs.\ 1.4045 and 54.09\%).
+The raw cross-entropy was already 0.008 lower halfway through the cool-down, consistent with less
+gradient noise. The run continued from step 24k with pure teacher
 targets (still 0.4/0.6 under 30\,s) to 80k steps. By step 48k the constant-rate phase gained only
 0.001 nats per 2k steps, so the linear decay to 2\% of the peak rate was started there, covering the
 last 40\% of training instead of the planned 30\%. In total the model sees about 41M samples, 3.4 passes over the pool.
 
 \paragraph{How far distillation can go.} A student trained to match a teacher approaches the
-teacher's accuracy from below. Table~\ref{tab:teachers} scores every Maia-3 checkpoint and their
-averages on the 10k development subset of the ALLIE test sample. The clock-aware teacher we use is 0.2 points
-below Maia-3-79M; the best ensemble (79M, 23M and 23M-ponder, averaged logits) is 0.3 points above
-it. Distillation alone can therefore at most edge past the strongest Maia-3 under Maia's protocol.
+teacher's accuracy from below. Table~\ref{tab:teachers} scores the four main Maia-3 checkpoints and
+ensembles of them on the 10k development subset of the ALLIE test sample. The clock-aware teacher we
+use is 0.2 points below Maia-3-79M; the best ensemble (79M, 23M and 23M-ponder, averaged logits) is
+0.3 points above it. With our single teacher, distillation alone is therefore bounded about 0.2
+points below Maia-3-79M under Maia's protocol; only an ensemble teacher could edge past it.
 Beating it clearly needs what a teacher cannot supply: far more human moves, or information the
 teacher does not see. Cloverb's clock, increment and 64-ply history are such information, and they
 matter most in exactly the positions Maia's protocol removes.

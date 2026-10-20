@@ -1,7 +1,8 @@
 \begin{table}[t]\centering\small
 \caption{Released Maia-3 checkpoints on 100,016 positions of the ALLIE test set under Maia's protocol
 (first 10 plies and time pressure removed). ``Paper'' is the accuracy reported on the full 884,049 positions.
-95\% binomial half-width $\approx$0.31 points.}\label{tab:maia3}
+95\% half-width $\approx$0.4 points with positions clustered by game (0.31 if they were independent);
+differences between checkpoints, paired on the same positions, have half-widths of 0.15--0.19 points.}\label{tab:maia3}
 \begin{tabular}{lrrrrr}\toprule
 Checkpoint & Params & Paper top-1 & Top-1 & Top-3 & CE (nats)\\\midrule
 Maia-3 79M & 78.9M & 57.1 & 56.82 & 83.51 & 1.302 \\

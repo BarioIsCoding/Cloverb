@@ -32,7 +32,8 @@ def maia3_suite():
     tex = r"""\begin{table}[t]\centering\small
 \caption{Released Maia-3 checkpoints on 100,016 positions of the ALLIE test set under Maia's protocol
 (first 10 plies and time pressure removed). ``Paper'' is the accuracy reported on the full 884,049 positions.
-95\% binomial half-width $\approx$0.31 points.}\label{tab:maia3}
+95\% half-width $\approx$0.4 points with positions clustered by game (0.31 if they were independent);
+differences between checkpoints, paired on the same positions, have half-widths of 0.15--0.19 points.}\label{tab:maia3}
 \begin{tabular}{lrrrrr}\toprule
 Checkpoint & Params & Paper top-1 & Top-1 & Top-3 & CE (nats)\\\midrule
 """ + "\n".join(rows) + "\n\\bottomrule\\end{tabular}\\end{table}\n"
@@ -45,19 +46,27 @@ def run_curve(log):
     return {d["positions_seen"]: d["eval_ema"] for d in (json.loads(l) for l in open(log)) if "eval_ema" in d}
 
 
+def throughput(log):
+    """End-to-end training positions per second: positions processed by the last logged step / training hours."""
+    rows = [json.loads(l) for l in open(log)]
+    last = [d for d in rows if "hours" in d][-1]
+    per_step = next(d["positions_seen"] / d["step"] for d in rows if "positions_seen" in d)
+    return last["step"] * per_step / (3600 * last["hours"])
+
+
 def arch_table(runs):
-    """runs: [(label, log path, pos/s)] -> top-1 / CE at each evaluated sample count."""
-    cols = sorted({n for _, p, _ in runs for n in run_curve(p)})
+    """runs: [(label, log path)] -> pos/s and top-1 / CE at each evaluated sample count."""
+    cols = sorted({n for _, p in runs for n in run_curve(p)})
     head = " & ".join(f"{n / 1e6:.2f}M" for n in cols)
     rows = []
-    for lab, p, speed in runs:
+    for lab, p in runs:
         c = run_curve(p)
         cells = " & ".join(f"{100 * c[n]['top1']:.1f} / {c[n]['ce']:.2f}" if n in c else "--" for n in cols)
-        rows.append(f"{lab} & {speed} & {cells} \\\\")
+        rows.append(f"{lab} & {throughput(p):.0f} & {cells} \\\\")
     tex = (r"\begin{table}[t]\centering\small" "\n"
            r"\caption{Equal-data comparison on the ALLIE 10k sample (EMA weights): top-1 (\%) / cross-entropy after "
            r"$N$ training positions, same data stream and evaluation for all runs; throughput is end-to-end training "
-           r"positions per second on the 4-core CPU.}\label{tab:arch}" "\n"
+           r"positions per second on a 4-core CPU.}\label{tab:arch}" "\n"
            r"\begin{tabular}{lr" + "c" * len(cols) + r"}\toprule" "\n"
            f"Run & pos/s & {head}\\\\\\midrule\n" + "\n".join(rows) + "\n\\bottomrule\\end{tabular}\\end{table}\n")
     (OUT / "arch.tex").write_text(tex)
@@ -88,15 +97,19 @@ def main_table(sets, models):
 
 
 def diag_table(rows):
-    """rows: [(label, log path)] -> top-1 / top-3 / CE at 512k positions (EMA)."""
+    """rows: [(label, log path) or None for a rule] -> top-1 / top-3 / CE at 512k positions (EMA)."""
     out = []
-    for lab, p in rows:
+    for r in rows:
+        if r is None:
+            out.append("\\midrule")
+            continue
+        lab, p = r
         c = run_curve(p)
         e = c.get(512000)
         out.append(f"{lab} & {100 * e['top1']:.1f} & {100 * e['top3']:.1f} & {e['ce']:.3f} \\\\" if e else f"{lab} & -- & -- & -- \\\\")
     tex = (r"\begin{table}[t]\centering\small" "\n"
            r"\caption{Single-factor diagnostics after 512k training positions (EMA weights, ALLIE 10k sample; same data "
-           r"stream for every row). Rows below the rule are applied on top of geometry initialisation.}\label{tab:diag}" "\n"
+           r"stream for every row). Indented rows each change one factor of the geometry-initialised model.}\label{tab:diag}" "\n"
            r"\begin{tabular}{lrrr}\toprule" "\n"
            "Configuration & Top-1 & Top-3 & CE\\\\\\midrule\n" + "\n".join(out) + "\n\\bottomrule\\end{tabular}\\end{table}\n")
     (OUT / "diag.tex").write_text(tex)
@@ -104,4 +117,14 @@ def diag_table(rows):
 
 if __name__ == "__main__":
     maia3_suite()
+    L = R / "runs"
+    arch_table([("Chessformer-5M (Maia-3 architecture)", L / "cmpB_chessformer.jsonl"),
+                ("Cloverb d256 L8 (no teacher)", L / "cmpA_cloverb.jsonl"),
+                ("Cloverb + online Maia-3-23M teacher", L / "cmpC_distill.jsonl")])
+    diag_table([("Chessformer-5M (authors' module)", L / "cmpB_chessformer.jsonl"),
+                ("Cloverb, zero-initialised biases", L / "cmpA_cloverb.jsonl"), None,
+                ("Cloverb + geometry initialisation", L / "diag_geo.jsonl"),
+                ("\\quad + post-norm blocks", L / "diag_geo_postln.jsonl"),
+                ("\\quad + captured-piece type in history", L / "diag_geo_captype.jsonl"),
+                ("\\quad without dynamic templates ($T{=}0$)", L / "diag_geo_T0.jsonl")])
     print("tables written to", OUT)

@@ -1,8 +1,8 @@
 \begin{table}[t]\centering\small
-\caption{Equal-data comparison on the ALLIE 10k sample (EMA weights): top-1 (\%) / cross-entropy after $N$ training positions, same data stream and evaluation for all runs; throughput is end-to-end training positions per second on the 4-core CPU.}\label{tab:arch}
+\caption{Equal-data comparison on the ALLIE 10k sample (EMA weights): top-1 (\%) / cross-entropy after $N$ training positions, same data stream and evaluation for all runs; throughput is end-to-end training positions per second on a 4-core CPU.}\label{tab:arch}
 \begin{tabular}{lrccc}\toprule
 Run & pos/s & 0.51M & 1.02M & 1.54M\\\midrule
-Chessformer-5M (Maia-3 architecture) & 300 & 38.8 / 2.09 & 43.6 / 1.85 & 45.9 / 1.74 \\
-Cloverb d256 L8 (no teacher) & 315 & 37.5 / 2.14 & 41.7 / 1.94 & 44.7 / 1.82 \\
-Cloverb + online Maia-3-23M teacher & 153 & 42.9 / 1.90 & -- & -- \\
+Chessformer-5M (Maia-3 architecture) & 299 & 38.8 / 2.09 & 43.6 / 1.85 & 45.9 / 1.74 \\
+Cloverb d256 L8 (no teacher) & 306 & 37.5 / 2.14 & 41.7 / 1.94 & 44.7 / 1.82 \\
+Cloverb + online Maia-3-23M teacher & 167 & 42.9 / 1.90 & -- & -- \\
 \bottomrule\end{tabular}\end{table}

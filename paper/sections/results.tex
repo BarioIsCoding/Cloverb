@@ -1,23 +1,23 @@
 \subsection{Equal-data comparison with Chessformer}
 \input{tables/arch}
 We trained Cloverb (d=256, 8 layers, MLP$\times$2, FLOP-matched to Maia-3-5M: 0.30 vs.\ 0.32
-GMAC per position) and the authors' own Chessformer-5M module (inputs exactly as in
-\texttt{maia3.uci}) on the identical stream of 1.54M positions with the same optimiser, schedule
+GMAC per position) and the authors' own Chessformer-5M module (inputs as in \texttt{maia3.uci} with
+\texttt{--use-uci-history}: the last 8 boards and both Elos) on the identical stream of 1.54M positions with the same optimiser, schedule
 shape and evaluation (Table~\ref{tab:arch}). Two findings shaped the final system.
 
 \emph{First, Chessformer's recipe is the bottleneck, not its architecture.} With a sensible
 learning rate, pre-processing and kernels, the published 5M architecture learns fast:
-45.9\% after 1.5M positions, i.e.\ 83\% of the way from chance to its published accuracy after
-0.3\% of its published training data. The first Cloverb configuration learned \emph{more slowly
-per position} (44.7\%) even though it trains 5\% faster per second; Section~\ref{sec:diag}
+45.9\% after 1.5M positions, i.e.\ 81\% of the way from chance (a uniform guess among legal moves,
+6.1\%) to its published accuracy after 0.3\% of its published training data. The first Cloverb configuration learned \emph{more slowly
+per position} (44.7\%) even though it trains about 2\% faster per second; Section~\ref{sec:diag}
 isolates why.
 
-\emph{Second, a teacher is worth more than data.} Distilling the released Maia-3-23M online
+\emph{Second, a teacher is worth more than data.} Distilling~\cite{hinton} the released Maia-3-23M online
 (soft targets with weight 0.7 plus the human move) lifts Cloverb from 37.5\% to 42.9\% at 0.5M
 positions, beyond what the student reaches with twice the data. Because the teacher's forward
 pass costs about as much as a student training step, we amortise it: the final model trains for
 several epochs on a fixed pool of positions labelled once by the clock-aware
-Maia-3-23M-ponder checkpoint (top-16 moves, which hold 99.1\% of the probability mass).
+Maia-3-23M-ponder checkpoint (top-16 moves, which hold 99.2\% of the probability mass).
 
 \subsection{Diagnosing the per-sample gap: geometry is the missing prior}\label{sec:diag}
 \input{tables/diag}
@@ -27,16 +27,18 @@ attention biases with chess geometry}. Each of the first heads of every layer st
 $+2$ logit bonus on the squares reachable by one movement pattern (rook lines, bishop diagonals,
 knight jumps, king steps, pawn-capture squares, same file) and one head with a Chebyshev-distance
 penalty; the biases remain fully trainable. This single prior lifts Cloverb from 37.5\% to
-44.4\% after 512k positions, \emph{5.6 points above the Maia-3 architecture} at equal data, and
-reaches what the zero-initialised model needed three times the data for. It also answers the
-paper's missing baseline: most of what GAB contributes early in training is geometry, which a
-static, per-square bias with the right initialisation supplies at a fraction of the cost.
-Post-norm blocks (as in Chessformer) add a further 0.6 points on top of the geometric prior at
-6\% lower throughput; encoding \emph{which} piece was captured in the move history adds 0.3 points
-for free; and the dynamic template mix contributes nothing (44.35\% without vs.\ 44.37\% with, equal
+44.4\% after 512k positions, \emph{5.5 points above the Maia-3 architecture} at equal data (44.37\%
+vs.\ 38.84\%; that run used Chessformer's lower peak learning rate, $5\times10^{-4}$), and nearly matches
+(44.4\% vs.\ 44.7\%) what the zero-initialised model reached with three times the data. It bears on
+the paper's missing baseline: early in training, much of what a dynamic bias could contribute is
+geometry, which a static, per-square bias with the right initialisation supplies at a fraction of the
+cost (we did not retrain Chessformer itself with such a bias).
+Post-norm blocks (as in Chessformer) add a further 0.6 points on top of the geometric prior;
+encoding \emph{which} piece was captured in the move history adds 0.3 points for one extra
+embedding lookup; and the dynamic template mix contributes nothing (44.35\% without vs.\ 44.37\% with, equal
 cross-entropy), so the final model drops it and keeps only static, geometry-initialised biases.
 
-\subsection{Final model}
+\subsection{Final model}\label{sec:final}
 \input{sections/final_run}
 \input{tables/main}
 \input{tables/fresh}
@@ -47,20 +49,26 @@ cross-entropy), so the final model drops it and keeps only static, geometry-init
 
 \subsection{Inference}
 \input{tables/infer}
-Cloverb ships as a single C file with no Python or PyTorch dependency: the C chess core encodes the
+Cloverb ships as a standalone C program (one translation unit, two source files) with no Python or
+PyTorch dependency at run time: the C chess core encodes the
 position and its history, the trunk's GEMMs run on AMX bf16 tiles with weights packed once into VNNI
 tiles, attention runs in AVX-512 with each head's scores kept in registers and L1, and the policy head
-stays in fp32. Against the PyTorch forward pass of the same weights it reproduces move probabilities to
-within $10^{-3}$ and the same top move on every tested position.
+stays in fp32. On 500 random positions of the fresh 2026 games, an fp32 build (AVX-512, no AMX)
+reproduces the PyTorch forward pass of the trained weights to within $2.2\cdot10^{-6}$ in every
+legal-move probability and the AMX bf16 build to within $2.6\cdot10^{-3}$ (mean KL $2.4\cdot10^{-6}$
+nats), both with the same top move on every position (\texttt{results/engine\_check.json}).
 
 \section{Limitations}
 \begin{itemize}
-\item \textbf{Compute.} Every number here comes from one 4-core CPU over a few days; Cloverb saw
+\item \textbf{Compute.} Every number here comes from 4-core Xeon CPUs, one at a time, over a few days
+(the container moved between hosts: hosts with AMX ran most of training, the Maia-3 benchmarks and
+the speed measurements; a host without AMX ran the last 5.5k training steps and the final Cloverb
+evaluation, both in fp32). Cloverb saw
 tens of millions of positions, Maia-3 half a billion. Our conclusions about architecture are about
 learning speed in this regime; at Maia-3's budget the geometric prior's advantage may shrink.
 \item \textbf{Teacher.} The final model is distilled from a released Maia-3 checkpoint (with the
 human move as a second target), so its accuracy partly inherits Maia-3's; the equal-data
-comparisons in Tables~\ref{tab:arch} and~\ref{tab:diag} use no teacher. Maia-3 never trained on
+comparisons in Table~\ref{tab:diag} and the first two rows of Table~\ref{tab:arch} use no teacher. Maia-3 never trained on
 positions with less than 30\,s on the clock, so in time trouble the human move keeps a weight of 0.6
 in our loss (elsewhere 0.3 for the first 24k steps and 0 afterwards).
 \item \textbf{Opponent rating.} By design Cloverb sees only the mover's rating, as an engine user

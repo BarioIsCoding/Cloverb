@@ -25,7 +25,10 @@ and the ALLIE authors' independent Maia-3 scorer (`y0mingzhang/allie`, `src/alli
   | 5M, history n=0 (`hist1`) | 54.0 | 53.79 | 81.34 |
   | 5M, history n=31 (`hist32`) | 55.4 | 55.15 | 82.26 |
 
-  Our sample is ~0.2 points harder than the full set across the board; orderings match.
+  Our sample is harder than the full set for every variant, by 0.13-0.33 points (0.23 on average; the
+  paper reports one decimal). All orderings match except absolute PE vs. relative bias (54.37 vs. 54.47
+  here, 54.7 vs. 54.6 in the paper; paired difference -0.09 +- 0.19 points, within noise), and all gaps
+  agree to within 0.2 points.
 
 ## Sloppiness in the paper
 
@@ -102,12 +105,12 @@ and the ALLIE authors' independent Maia-3 scorer (`y0mingzhang/allie`, `src/alli
 | Maia-3 / Chessformer | Lesson | Cloverb |
 |---|---|---|
 | Squares as tokens + from-to attention policy head | Works; keep it | Same token layout; same 4352-move vocabulary (so Maia-3 can teach Cloverb) |
-| GAB maps correlate 0.77 across positions | Most of the bias is static geometry | Per-layer, per-head static 64x64 bias + only 8 dynamic templates (GAB-lite), fused into the attention kernel |
-| History = 8 alternating-orientation board snapshots through one linear map; "32 = 8" | The encoding, not chess, limits history | 64 plies encoded as *moves* scatter-added onto the squares they touched, one orientation, ~O(64 d) cost |
+| GAB maps correlate 0.77 across positions | Much of the bias may be static geometry | Per-layer, per-head static 64x64 bias, initialised with chess geometry, fused into the attention kernel; a cheap dynamic template mix added nothing in our diagnostics, so the final model has none |
+| History = 8 alternating-orientation board snapshots through one linear map; "32 = 8" | The encoding may be what limits history (untested) | 64 plies encoded as *moves* scatter-added onto the squares they touched, one orientation, ~O(64 d) cost |
 | Elo as two 128-d vectors concatenated to all 64 tokens | Skill is a scalar; let it act everywhere | Player Elo (hat-encoded) + clock features -> one conditioning vector -> adaLN-Zero in every block |
 | No clock; time pressure removed from data and protocol | The clock changes human moves most when it is low | Base, increment and time left are inputs; time-pressure positions are trained on and evaluated |
-| No castling / en passant / 50-move state | Missing state is free accuracy lost | Castling rights on rook squares, en-passant square, halfmove/fullmove counters |
-| Post-LN, lr 5e-5, 1M steps on 8 A100s | Recipe, not architecture, sets the budget | Pre-norm + QK-norm, lr 1e-3, warmup + linear decay, EMA; trains on one 4-core CPU |
+| No castling / 50-move state; en passant only implicit in the history frames | Make the state explicit | Castling rights on rook squares, en-passant square, halfmove/fullmove counters |
+| Post-LN, lr 5e-5, 1M steps on 8 A100s | Recipe, not architecture, sets the budget | Post-norm (as in Chessformer, +0.6 points over pre-norm in our diagnostics) + QK-norm, lr 1e-3, warmup + linear decay, EMA; trains on a 4-core CPU |
 | Released engine without history by default (-2.2 points) | Defaults are part of the model | Cloverb's engine always uses the game's moves; history cannot be switched off |
 | Policy logits in reduced precision | bf16 logits tie and inflate top-1 by ~1 point | Policy head in fp32 at inference / evaluation |
 | `nn.MultiheadAttention` with float masks; Python promotion loop | Implementation matters on small sequences | Fused AVX-512 attention kernel (scores in L1), vectorised promotion logits, C data pipeline |

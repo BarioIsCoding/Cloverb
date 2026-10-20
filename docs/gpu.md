@@ -1,10 +1,10 @@
 # Training Cloverb on an NVIDIA GPU
 
-Everything in the paper ran on a 4-core CPU. The same code trains on CUDA with `--device cuda`:
+Everything in the paper ran on 4-core CPUs. The same code trains on CUDA with `--device cuda`:
 attention then uses PyTorch's SDPA instead of the AVX-512 kernel, autocast uses bf16 tensor cores
 (Ampere or newer, e.g. an RTX 3060), and batches are copied from pinned memory. The GPU path is
 written to be equivalent to the tested CPU path but has not been run on a GPU by us yet; expect
-roughly 10-15x the CPU's ~280 positions/s on an RTX 3060 (an estimate, not a measurement).
+roughly 10-15x the CPU's ~250 positions/s (bf16 on AMX) on an RTX 3060 (an estimate, not a measurement).
 
 Windows: use WSL2 (Ubuntu) with the normal Windows NVIDIA driver; the data pipeline is C built with gcc.
 
@@ -51,16 +51,15 @@ README (Third-party material).
 
 ## 4. Train
 
-Continue the paper's model from its latest snapshot on the `checkpoints` branch (weights and step only;
-the optimiser restarts with a short learning-rate warm-up):
+Fine-tune the paper's finished model (step 80k, shipped as `checkpoints/cloverb.pt`) for another 40k steps
+with a fresh schedule (weights only; the optimiser restarts with a short warm-up, the learning rate decays
+linearly over the last 40% as in the paper):
 
 ```bash
-curl -L -o models/model.pt https://github.com/BarioIsCoding/cloverb/raw/checkpoints/final/model.pt
-curl -L -o models/ema.pt   https://github.com/BarioIsCoding/cloverb/raw/checkpoints/final/ema.pt
 python -m cloverb.train --device cuda --compile --stores data/store/merged --teacher-cache data/pool/*.npz \
   --out runs/gpu --d 256 --layers 10 --mlp 3 --heads 8 --templates 0 --geo-init --postln --cap-type \
-  --lr 1e-3 --warmup 300 --decay-frac 0.3 --distill-w 1.0 --distill-w-pressure 0.4 --ema 0.9998 \
-  --steps 80000 --init models/model.pt --init-ema models/ema.pt
+  --lr 3e-4 --warmup 300 --decay-frac 0.4 --distill-w 1.0 --distill-w-pressure 0.4 --ema 0.9998 \
+  --steps 40000 --init checkpoints/cloverb.pt --init-step 0
 ```
 
 or start a larger model from scratch (e.g. `--d 512 --layers 12 --heads 16`, about 37M parameters;

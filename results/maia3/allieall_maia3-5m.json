@@ -1,0 +1,19 @@
+{
+  "variant": "maia3-5m",
+  "params": 5230084,
+  "positions": 141390,
+  "top1": 0.5492750548129288,
+  "top1_ci": 0.00259356692708006,
+  "top3": 0.8234316429733362,
+  "top3_ci": 0.0019875448528002535,
+  "ce": 1.3719927072525024,
+  "history": 8,
+  "history_mode": "own",
+  "dtype": "bf16",
+  "seconds": 307.410702582,
+  "forward_seconds": 297.5079295279999,
+  "pos_per_s": 459.9384433021978,
+  "store": "/home/user/data/bench/allie2022.npz",
+  "subset": "/home/user/data/bench/allie_sub_allplies.npy",
+  "protocol": "subset"
+}
